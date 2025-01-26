@@ -4,8 +4,6 @@ sidebar_position: 1
 slug: /redis_best_practices
 ---
 
-import Badge from '@site/src/components/Badge';
-
 # Redis 最佳实践
 
 为保证元数据服务稳定，我们建议使用云平台提供的 Redis 托管服务，详情查看[「推荐的 Redis 托管服务」](#推荐的-redis-托管服务)。
@@ -29,7 +27,7 @@ used_memory_dataset: 13439673592
 used_memory_dataset_perc: 70.12%
 ```
 
-其中 `used_memory_rss` 是 Redis 实际使用的总内存大小，这里既包含了存储在 Redis 中的数据大小（也就是上面的 `used_memory_dataset`），也包含了一些 Redis 的[系统开销](https://redis.io/commands/memory-stats)（也就是上面的 `used_memory_overhead`）。前面提到每个文件的元数据大约占用 300 字节是通过 `used_memory_dataset` 来计算的，如果你发现你的 JuiceFS 文件系统中单个文件元数据占用空间远大于 300 字节，可以尝试运行 [`juicefs gc`](../../reference/command_reference.md#gc) 命令来清理可能存在的冗余数据。
+其中 `used_memory_rss` 是 Redis 实际使用的总内存大小，这里既包含了存储在 Redis 中的数据大小（也就是上面的 `used_memory_dataset`），也包含了一些 Redis 的[系统开销](https://redis.io/commands/memory-stats)（也就是上面的 `used_memory_overhead`）。前面提到每个文件的元数据大约占用 300 字节是通过 `used_memory_dataset` 来计算的，如果你发现你的 JuiceFS 文件系统中单个文件元数据占用空间远大于 300 字节，可以尝试运行 [`juicefs gc`](../../reference/command_reference.mdx#gc) 命令来清理可能存在的冗余数据。
 
 ## 数据可用性
 
@@ -126,17 +124,13 @@ Redis 对数据备份非常友好，因为您可以在数据库运行时复制 R
 
 如果 AOF 和 RDB 同时开启，Redis 启动时会优先使用 AOF 文件来恢复数据，因为 AOF 保证是最完整的数据。
 
-在恢复完 Redis 数据以后，可以继续通过新的 Redis 地址使用 JuiceFS 文件系统。建议运行 [`juicefs fsck`](../../reference/command_reference.md#juicefs-fsck) 命令检查文件系统数据的完整性。
+在恢复完 Redis 数据以后，可以继续通过新的 Redis 地址使用 JuiceFS 文件系统。建议运行 [`juicefs fsck`](../../reference/command_reference.mdx#fsck) 命令检查文件系统数据的完整性。
 
 ## 推荐的 Redis 托管服务
 
 ### Amazon MemoryDB for Redis
 
 [Amazon MemoryDB for Redis](https://aws.amazon.com/memorydb) 是一种持久的内存数据库服务，可提供超快的性能。MemoryDB 与 Redis 兼容，使用 MemoryDB，你的所有数据都存储在内存中，这使你能够实现微秒级读取和数毫秒的写入延迟和高吞吐。MemoryDB 还使用多可用区事务日志跨多个可用区持久存储数据，以实现快速故障切换、数据库恢复和节点重启。
-
-### Amazon ElastiCache for Redis
-
-[Amazon ElastiCache for Redis](https://aws.amazon.com/elasticache/redis) 是为云构建的完全托管的、与 Redis 兼容的内存数据存储。它提供[自动故障切换](https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/AutoFailover.html)、[自动备份](https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/backups-automatic.html)等功能以确保可用性和持久性。
 
 ### Google Cloud Memorystore for Redis
 

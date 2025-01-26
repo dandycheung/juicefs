@@ -41,27 +41,29 @@ func (s *oos) String() string {
 func (s *oos) Limits() Limits {
 	return Limits{
 		IsSupportMultipartUpload: true,
-		IsSupportUploadPartCopy:  false,
+		MinPartSize:              5 << 20,
+		MaxPartSize:              5 << 30,
+		MaxPartCount:             10000,
 	}
 }
 
 func (s *oos) Create() error {
-	_, err := s.List("", "", "", 1)
+	_, _, _, err := s.List("", "", "", "", 1, true)
 	if err != nil {
 		return fmt.Errorf("please create bucket %s manually", s.s3client.bucket)
 	}
 	return err
 }
 
-func (s *oos) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (s *oos) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	objs, err := s.s3client.List(prefix, marker, delimiter, limit)
-	if marker != "" && len(objs) > 0 && objs[0].Key() == marker {
+	objs, hasMore, nextMarker, err := s.s3client.List(prefix, start, token, delimiter, limit, followLink)
+	if start != "" && len(objs) > 0 && objs[0].Key() == start {
 		objs = objs[1:]
 	}
-	return objs, err
+	return objs, hasMore, nextMarker, err
 }
 
 func newOOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
@@ -77,13 +79,13 @@ func newOOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error)
 	bucket := hostParts[0]
 	region := hostParts[1][4:]
 	endpoint = uri.Host[len(bucket)+1:]
-	forcePathStyle := strings.Contains(strings.ToLower(endpoint), "xstore.ctyun.cn")
+	forcePathStyle := !strings.Contains(strings.ToLower(endpoint), "xstore.ctyun.cn")
 
 	awsConfig := &aws.Config{
 		Region:           &region,
 		Endpoint:         &endpoint,
 		DisableSSL:       aws.Bool(!ssl),
-		S3ForcePathStyle: aws.Bool(!forcePathStyle),
+		S3ForcePathStyle: aws.Bool(forcePathStyle),
 		HTTPClient:       httpClient,
 		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, token),
 	}

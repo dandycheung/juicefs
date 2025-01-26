@@ -19,6 +19,8 @@ package cmd
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,8 +30,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/utils"
+	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/urfave/cli/v2"
 )
 
@@ -71,6 +75,14 @@ $ juicefs warmup -f /tmp/filelist`,
 				Aliases: []string{"b"},
 				Usage:   "run in background",
 			},
+			&cli.BoolFlag{
+				Name:  "evict",
+				Usage: "evict cached blocks",
+			},
+			&cli.BoolFlag{
+				Name:  "check",
+				Usage: "check whether the data blocks are cached or not",
+			},
 		},
 	}
 }
@@ -83,6 +95,8 @@ func readControl(cf *os.File, resp []byte) int {
 			return n
 		} else if err == io.EOF {
 			time.Sleep(time.Millisecond * 300)
+		} else if errors.Is(err, syscall.EBADF) {
+			logger.Fatalf("JuiceFS client was restarted")
 		} else {
 			logger.Fatalf("Read message: %d %s", n, err)
 		}
@@ -103,11 +117,17 @@ END:
 				off += 17
 			} else if off+5 < n && resp[off] == meta.CDATA {
 				size := binary.BigEndian.Uint32(resp[off+1 : off+5])
-				if off+5+int(size) > n {
-					logger.Errorf("Bad response off %d n %d: %v", off, n, resp)
-					break
+				data = resp[off+5:]
+				if size > uint32(len(resp[off+5:])) {
+					tailData, err := io.ReadAll(cf)
+					if err != nil {
+						logger.Errorf("Read data error: %v", err)
+						break END
+					}
+					data = append(data, tailData...)
+				} else {
+					data = data[:size]
 				}
-				data = append(data, resp[off+5:off+5+int(size)]...)
 				break END
 			} else {
 				logger.Errorf("Bad response off %d n %d: %v", off, n, resp)
@@ -122,35 +142,58 @@ END:
 }
 
 // send fill-cache command to controller file
-func sendCommand(cf *os.File, batch []string, threads uint, background bool, dspin *utils.DoubleSpinner) {
+func sendCommand(cf *os.File, action vfs.CacheAction, batch []string, threads uint, background bool, dspin *utils.DoubleSpinner) vfs.CacheResponse {
 	paths := strings.Join(batch, "\n")
 	var back uint8
 	if background {
 		back = 1
 	}
-	wb := utils.NewBuffer(8 + 4 + 3 + uint32(len(paths)))
+	headerLen, bodyLen := uint32(8), uint32(4+len(paths)+2+1+1)
+	wb := utils.NewBuffer(headerLen + bodyLen)
 	wb.Put32(meta.FillCache)
-	wb.Put32(4 + 3 + uint32(len(paths)))
+	wb.Put32(bodyLen)
+
 	wb.Put32(uint32(len(paths)))
 	wb.Put([]byte(paths))
 	wb.Put16(uint16(threads))
 	wb.Put8(back)
+	wb.Put8(uint8(action))
+
 	if _, err := cf.Write(wb.Bytes()); err != nil {
 		logger.Fatalf("Write message: %s", err)
 	}
+
+	var resp vfs.CacheResponse
 	if background {
-		logger.Infof("Warm-up cache for %d paths in background", len(batch))
-		return
+		logger.Infof("%s for %d paths in background", action, len(batch))
+		return resp
 	}
-	if _, errno := readProgress(cf, func(count, bytes uint64) {
-		dspin.SetCurrent(int64(count), int64(bytes))
-	}); errno != 0 {
-		logger.Fatalf("Warm up failed: %s", errno)
+
+	lastCnt, lastBytes := dspin.Current()
+	data, errno := readProgress(cf, func(fileCount, totalBytes uint64) {
+		dspin.SetCurrent(lastCnt+int64(fileCount), lastBytes+int64(totalBytes))
+	})
+
+	if errno != 0 {
+		logger.Fatalf("%s failed: %s", action, errno)
 	}
+
+	err := json.Unmarshal(data, &resp)
+	if err != nil {
+		logger.Fatalf("unmarshal error: %s", err)
+	}
+
+	return resp
 }
 
 func warmup(ctx *cli.Context) error {
 	setup(ctx, 0)
+
+	evict, check := ctx.Bool("evict"), ctx.Bool("check")
+	if evict && check {
+		logger.Fatalf("--check and --evict can't be used together")
+	}
+
 	var paths []string
 	for _, p := range ctx.Args().Slice() {
 		if abs, err := filepath.Abs(p); err == nil {
@@ -180,32 +223,48 @@ func warmup(ctx *cli.Context) error {
 		}
 	}
 	if len(paths) == 0 {
-		logger.Infof("Nothing to warm up")
+		logger.Infof("no path")
 		return nil
 	}
 
 	// find mount point
 	first := paths[0]
-	mp, err := findMountpoint(first)
-	if err != nil {
-		return err
-	}
-	controller, err := openController(mp)
+	controller, err := openController(first)
 	if err != nil {
 		return fmt.Errorf("open control file for %s: %s", first, err)
 	}
 	defer controller.Close()
+
+	mp := first
+	for ; mp != "/"; mp = filepath.Dir(mp) {
+		inode, err := utils.GetFileInode(mp)
+		if err != nil {
+			logger.Fatalf("lookup inode for %s: %s", mp, err)
+		}
+		if inode == uint64(meta.RootInode) {
+			break
+		}
+	}
 
 	threads := ctx.Uint("threads")
 	if threads == 0 {
 		logger.Warnf("threads should be larger than 0, reset it to 1")
 		threads = 1
 	}
+
+	action := vfs.WarmupCache
+	if evict {
+		action = vfs.EvictCache
+	} else if check {
+		action = vfs.CheckCache
+	}
+
 	background := ctx.Bool("background")
 	start := len(mp)
 	batch := make([]string, 0, batchMax)
 	progress := utils.NewProgress(background)
-	dspin := progress.AddDoubleSpinner("Warming up")
+	dspin := progress.AddDoubleSpinnerTwo(fmt.Sprintf("%s file", action), fmt.Sprintf("%s size", action))
+	total := &vfs.CacheResponse{}
 	for _, path := range paths {
 		if mp == "/" {
 			inode, err := utils.GetFileInode(path)
@@ -221,18 +280,30 @@ func warmup(ctx *cli.Context) error {
 			continue
 		}
 		if len(batch) >= batchMax {
-			sendCommand(controller, batch, threads, background, dspin)
-			batch = batch[0:]
+			resp := sendCommand(controller, action, batch, threads, background, dspin)
+			total.Add(resp)
+			batch = batch[:0]
 		}
 	}
 	if len(batch) > 0 {
-		sendCommand(controller, batch, threads, background, dspin)
+		resp := sendCommand(controller, action, batch, threads, background, dspin)
+		total.Add(resp)
 	}
 	progress.Done()
+
 	if !background {
 		count, bytes := dspin.Current()
-		logger.Infof("Successfully warmed up %d files (%d bytes)", count, bytes)
+		switch action {
+		case vfs.WarmupCache:
+			logger.Infof("%s: %d files (%s bytes)", action, count, humanize.IBytes(uint64(bytes)))
+		case vfs.EvictCache:
+			logger.Infof("%s: %d files (%s bytes)", action, count, humanize.IBytes(uint64(bytes)))
+		case vfs.CheckCache:
+			logger.Infof("%s: %d files checked, %s of %s (%2.1f%%) cached", action, count,
+				humanize.IBytes(uint64(bytes)-total.MissBytes),
+				humanize.IBytes(uint64(bytes)),
+				float64(uint64(bytes)-total.MissBytes)*100/float64(bytes))
+		}
 	}
-
 	return nil
 }

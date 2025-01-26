@@ -62,7 +62,7 @@ func (u *up) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (u *up) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (u *up) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	w := bytes.NewBuffer(nil)
 	_, err := u.c.Get(&upyun.GetObjectConfig{
 		Path:   "/" + key,
@@ -78,14 +78,14 @@ func (u *up) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewBuffer(data)), nil
 }
 
-func (u *up) Put(key string, in io.Reader) error {
+func (u *up) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	return u.c.Put(&upyun.PutObjectConfig{
 		Path:   "/" + key,
 		Reader: in,
 	})
 }
 
-func (u *up) Delete(key string) error {
+func (u *up) Delete(key string, getters ...AttrGetter) error {
 	return u.c.Delete(&upyun.DeleteObjectConfig{
 		Path: "/" + key,
 	})
@@ -98,9 +98,9 @@ func (u *up) Copy(dst, src string) error {
 	})
 }
 
-func (u *up) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (u *up) List(prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if delimiter != "" {
-		return nil, notSupportedDelimiter
+		return nil, false, "", notSupported
 	}
 	if u.listing == nil {
 		listing := make(chan *upyun.FileInfo, limit)
@@ -125,11 +125,10 @@ func (u *up) List(prefix, marker, delimiter string, limit int64) ([]Object, erro
 			objs = append(objs, &obj{key, fi.Size, fi.Time, strings.HasSuffix(key, "/"), ""})
 		}
 	}
-	if len(objs) > 0 {
-		return objs, nil
+	if len(objs) == 0 {
+		u.listing = nil
 	}
-	u.listing = nil
-	return nil, u.err
+	return generateListResult(objs, limit)
 }
 
 func newUpyun(endpoint, user, passwd, token string) (ObjectStorage, error) {

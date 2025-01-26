@@ -81,13 +81,20 @@ func (q *qingstor) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (q *qingstor) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (q *qingstor) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	input := &qs.GetObjectInput{}
 	rangeStr := getRange(off, limit)
 	if rangeStr != "" {
 		input.Range = &rangeStr
 	}
 	output, err := q.bucket.GetObject(key, input)
+	if output != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(aws.StringValue(output.RequestID))
+		if output.XQSStorageClass != nil {
+			attrs.SetStorageClass(*output.XQSStorageClass)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +140,7 @@ func findLen(in io.Reader) (io.Reader, int64, error) {
 	return in, vlen, nil
 }
 
-func (q *qingstor) Put(key string, in io.Reader) error {
+func (q *qingstor) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	body, vlen, err := findLen(in)
 	if err != nil {
 		return err
@@ -148,6 +155,10 @@ func (q *qingstor) Put(key string, in io.Reader) error {
 		input.XQSStorageClass = &q.sc
 	}
 	out, err := q.bucket.PutObject(key, input)
+	if out != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(aws.StringValue(out.RequestID)).SetStorageClass(q.sc)
+	}
 	if err != nil {
 		return err
 	}
@@ -175,19 +186,23 @@ func (q *qingstor) Copy(dst, src string) error {
 	return nil
 }
 
-func (q *qingstor) Delete(key string) error {
-	_, err := q.bucket.DeleteObject(key)
+func (q *qingstor) Delete(key string, getters ...AttrGetter) error {
+	output, err := q.bucket.DeleteObject(key)
+	if output != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(aws.StringValue(output.RequestID))
+	}
 	return err
 }
 
-func (q *qingstor) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (q *qingstor) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
 	limit_ := int(limit)
 	input := &qs.ListObjectsInput{
 		Prefix: &prefix,
-		Marker: &marker,
+		Marker: &start,
 		Limit:  &limit_,
 	}
 	if delimiter != "" {
@@ -195,7 +210,7 @@ func (q *qingstor) List(prefix, marker, delimiter string, limit int64) ([]Object
 	}
 	out, err := q.bucket.ListObjects(input)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(out.Keys)
 	objs := make([]Object, n)
@@ -215,10 +230,10 @@ func (q *qingstor) List(prefix, marker, delimiter string, limit int64) ([]Object
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	return objs, *out.HasMore, *out.NextMarker, nil
 }
 
-func (q *qingstor) ListAll(prefix, marker string) (<-chan Object, error) {
+func (q *qingstor) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	return nil, notSupported
 }
 
@@ -303,8 +318,9 @@ func (q *qingstor) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, nextMarker, nil
 }
 
-func (q *qingstor) SetStorageClass(sc string) {
+func (q *qingstor) SetStorageClass(sc string) error {
 	q.sc = sc
+	return nil
 }
 
 func newQingStor(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {

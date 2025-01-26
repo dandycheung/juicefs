@@ -1,6 +1,6 @@
 ---
 title: Use JuiceFS on DigitalOcean
-sidebar_position: 5
+sidebar_position: 6
 slug: /clouds/digitalocean
 ---
 
@@ -44,7 +44,7 @@ Don't worry about the choice of database, the JuiceFS client provides a metadata
 
 For this article, we use DigitalOcean's Redis 6 database hosting service, choose `Singapore`, and select the same VPC private network as the existing Droplet. It takes about 5 minutes to create the Redis, and we follow the setup wizard to initialize the database.
 
-![](../images/digitalocean-redis-guide.png)
+![DigitalOcean-Redis-guide](../images/digitalocean-redis-guide.png)
 
 By default, the Redis allows all inbound connections. For security reasons, you should select the Droplet that have access to the Redis in the security setting section of the setup wizard in the `Add trusted sources`, that is, only allow the selected host to access the Redis.
 
@@ -54,36 +54,16 @@ In the setting of the eviction policy, it is recommended to select `noeviction`,
 
 The access address of the Redis can be found in the `Connection Details` of the console. If all computing resources are in DigitalOcean, it is recommended to use the VPC private network for connection first, which can maximize security.
 
-![](../images/digitalocean-redis-url.png)
+![DigitalOcean-Redis-url](../images/digitalocean-redis-url.png)
 
 ## Installation and Use
 
 ### 1. Install JuiceFS client
 
-We currently using Ubuntu Server 20.04, execute the following commands in sequence to install the latest version of the client.
-
-Check current system and set temporary environment variable:
+We currently using Ubuntu Server 20.04, execute the following command to install the latest version of the client.
 
 ```shell
-JFS_LATEST_TAG=$(curl -s https://api.github.com/repos/juicedata/juicefs/releases/latest | grep 'tag_name' | cut -d '"' -f 4 | tr -d 'v')
-```
-
-Download the latest version of the client software package adapted to the current system:
-
-```shell
-wget "https://github.com/juicedata/juicefs/releases/download/v${JFS_LATEST_TAG}/juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz"
-```
-
-Unzip the installation package:
-
-```shell
-mkdir juice && tar -zxvf "juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz" -C juice
-```
-
-Install the client to `/usr/local/bin`:
-
-```shell
-sudo install juice/juicefs /usr/local/bin
+curl -sSL https://d.juicefs.com/install | sh -
 ```
 
 Execute the command and see the command help information returned to `juicefs`, which means that the client is installed successfully.
@@ -155,7 +135,7 @@ $ juicefs format \
 
 **Parameter Description:**
 
-- `--storage`: Specify the data storage engine, here is `space`, click here to view all [supported storage](../guide/how_to_set_up_object_storage.md).
+- `--storage`: Specify the data storage engine, here is `space`, click here to view all [supported storage](../reference/how_to_set_up_object_storage.md).
 - `--bucket`: Specify the bucket access address.
 - `--access-key` and `--secret-key`: Specify the secret key for accessing the object storage API.
 - The Redis managed by DigitalOcean needs to be accessed with TLS/SSL encryption, so it needs to use the `rediss://` protocol header. The `/1` added at the end of the link represents the use of Redis's No. 1 database.
@@ -264,23 +244,9 @@ sudo juicefs umount ~/mnt
 
 > **Note**: Force unmount the file system in use may cause data damage or loss, please be careful to operate.
 
-### 6. Auto mount at boot
+### 6. Auto-mount on boot
 
-If you don't want to manually remount JuiceFS every time you restart the system, you can set up automatic mounting.
-
-First, you need to rename the `juicefs` client to `mount.juicefs` and copy it to the `/sbin/` directory:
-
-```shell
-sudo cp /usr/local/bin/juicefs /sbin/mount.juicefs
-```
-
-Edit the `/etc/fstab` configuration file and add a new record:
-
-```shell
-rediss://default:bn8l7ui2cun4iaji@private-db-redis-sgp1-03138-do-user-2500071-0.b.db.ondigitalocean.com:25061/1    /home/herald/mnt       juicefs     _netdev,cache-size=20480     0  0
-```
-
-In the mount option, `cache-size=20480` means to allocate 20GiB of local disk space as the local cache of JuiceFS. Please decide the allocated cache size according to the actual hardware. You can adjust the [FUSE mount options](../reference/fuse_mount_options.md) in the above configuration according to your needs.
+Please refer to ["Mount JuiceFS at Boot Time"](../administration/mount_at_boot.md) for more details.
 
 ### 7. Multi-host shared
 

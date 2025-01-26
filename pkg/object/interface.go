@@ -67,7 +67,7 @@ type Limits struct {
 	IsSupportMultipartUpload bool
 	IsSupportUploadPartCopy  bool
 	MinPartSize              int
-	MaxPartSize              int
+	MaxPartSize              int64
 	MaxPartCount             int
 }
 
@@ -81,20 +81,20 @@ type ObjectStorage interface {
 	// Create the bucket if not existed.
 	Create() error
 	// Get the data for the given object specified by key.
-	Get(key string, off, limit int64) (io.ReadCloser, error)
+	Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error)
 	// Put data read from a reader to an object specified by key.
-	Put(key string, in io.Reader) error
+	Put(key string, in io.Reader, getters ...AttrGetter) error
 	// Copy an object from src to dst.
 	Copy(dst, src string) error
 	// Delete a object.
-	Delete(key string) error
+	Delete(key string, getters ...AttrGetter) error
 
 	// Head returns some information about the object or an error if not found.
 	Head(key string) (Object, error)
-	// List returns a list of objects.
-	List(prefix, marker, delimiter string, limit int64) ([]Object, error)
+	// List returns a list of objects using ListObjectV2.
+	List(prefix, startAfter, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error)
 	// ListAll returns all the objects as an channel.
-	ListAll(prefix, marker string) (<-chan Object, error)
+	ListAll(prefix, marker string, followLink bool) (<-chan Object, error)
 
 	// CreateMultipartUpload starts to upload a large object part by part.
 	CreateMultipartUpload(key string) (*MultipartUpload, error)
@@ -108,4 +108,29 @@ type ObjectStorage interface {
 	CompleteUpload(key string, uploadID string, parts []*Part) error
 	// ListUploads lists existing multipart uploads.
 	ListUploads(marker string) ([]*PendingPart, string, error)
+}
+
+type Shutdownable interface {
+	Shutdown()
+}
+
+func Shutdown(o ObjectStorage) {
+	fn := func(o ObjectStorage) {
+		if s, ok := o.(Shutdownable); ok {
+			s.Shutdown()
+		}
+	}
+
+	switch o := o.(type) {
+	case *encrypted:
+		fn(o.ObjectStorage)
+	case *withPrefix:
+		fn(o.os)
+	case *sharded:
+		for _, s := range o.stores {
+			fn(s)
+		}
+	default:
+		fn(o)
+	}
 }

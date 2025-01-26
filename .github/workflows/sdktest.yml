@@ -24,7 +24,9 @@ on:
         description: "Run the build with tmate debugging enabled"
         required: false
         default: false
-
+  schedule:
+    - cron:  '0 17 * * *'
+    
 jobs:
   sdktest:
     timeout-minutes: 50
@@ -36,6 +38,7 @@ jobs:
           fetch-depth: 1
 
       - name: Build
+        timeout-minutes: 10
         uses: ./.github/actions/build
 
       - name: Set up Java
@@ -63,22 +66,29 @@ jobs:
           mkdir etc
           chmod 777 etc
           echo `hostname` > etc/nodes
+          echo "tom:3001" > users
+          echo "g1:2001:tom" > groups
+          mkdir /jfs/tmp
+          chmod 777 /jfs/tmp
 
       - name: Sdk Test
         run: |
           make -C sdk/java/libjfs
           cd sdk/java
           sudo mvn test -B
+          sudo mvn test -B -Dflink.version=1.17.2 -Dtest=io.juicefs.JuiceFileSystemTest#testFlinkHadoopRecoverableWriter 
           sudo mvn package -B -Dmaven.test.skip=true --quiet -Dmaven.javadoc.skip=true
+          expect=$(git rev-parse --short HEAD | cut -b 1-7)
+          ls /tmp/libjfs* | grep $expect
 
       - name: Send Slack Notification
-        if: ${{ failure() }}
+        if: failure()
         uses: juicedata/slack-notify-action@main
         with:
           channel-id: "${{ secrets.SLACK_CHANNEL_ID_FOR_PR_CHECK_NOTIFY }}"
           slack_bot_token: "${{ secrets.SLACK_BOT_TOKEN }}"  
 
       - name: Setup upterm session
-        if: ${{ failure() && github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true' }}
+        if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
         timeout-minutes: 60
         uses: lhotari/action-upterm@v1

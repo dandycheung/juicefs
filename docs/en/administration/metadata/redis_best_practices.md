@@ -4,8 +4,6 @@ sidebar_position: 1
 slug: /redis_best_practices
 ---
 
-import Badge from '@site/src/components/Badge';
-
 # Redis Best Practices
 
 To ensure metadata service performance, we recommend use Redis service managed by public cloud provider, see [Recommended Managed Redis Service](#recommended-managed-redis-service).
@@ -29,7 +27,7 @@ used_memory_dataset: 13439673592
 used_memory_dataset_perc: 70.12%
 ```
 
-Among them, `used_memory_rss` is the total memory size actually used by Redis, which includes not only the size of data stored in Redis (that is, `used_memory_dataset` above) but also some Redis [system overhead](https://redis.io/commands/memory-stats) (that is, `used_memory_overhead` above). As mentioned earlier that the metadata of each file occupies about 300 bytes, this is actually calculated by `used_memory_dataset`. If you find that the metadata of a single file in your JuiceFS file system occupies much more than 300 bytes, you can try to run [`juicefs gc`](../../reference/command_reference.md#gc) command to clean up possible redundant data.
+Among them, `used_memory_rss` is the total memory size actually used by Redis, which includes not only the size of data stored in Redis (that is, `used_memory_dataset` above) but also some Redis [system overhead](https://redis.io/commands/memory-stats) (that is, `used_memory_overhead` above). As mentioned earlier that the metadata of each file occupies about 300 bytes, this is actually calculated by `used_memory_dataset`. If you find that the metadata of a single file in your JuiceFS file system occupies much more than 300 bytes, you can try to run [`juicefs gc`](../../reference/command_reference.mdx#gc) command to clean up possible redundant data.
 
 ## High availability
 
@@ -126,17 +124,13 @@ After generating the AOF or RDB backup file, you can restore the data by copying
 
 If both AOF and RDB persistence are enabled, Redis will use the AOF file first on starting to recover the data because AOF is guaranteed to be the most complete data.
 
-After recovering Redis data, you can continue to use the JuiceFS file system via the new Redis address. It is recommended to run [`juicefs fsck`](../../reference/command_reference.md#juicefs-fsck) command to check the integrity of the file system data.
+After recovering Redis data, you can continue to use the JuiceFS file system via the new Redis address. It is recommended to run [`juicefs fsck`](../../reference/command_reference.mdx#fsck) command to check the integrity of the file system data.
 
 ## Recommended Managed Redis Service
 
 ### Amazon MemoryDB for Redis
 
 [Amazon MemoryDB for Redis](https://aws.amazon.com/memorydb) is a durable, in-memory database service that delivers ultra-fast performance. MemoryDB is compatible with Redis, with MemoryDB, all of your data is stored in memory, which enables you to achieve microsecond read and single-digit millisecond write latency and high throughput. MemoryDB also stores data durably across multiple Availability Zones (AZs) using a Multi-AZ transactional log to enable fast failover, database recovery, and node restarts.
-
-### Amazon ElastiCache for Redis
-
-[Amazon ElastiCache for Redis](https://aws.amazon.com/elasticache/redis) is a fully managed, Redis-compatible in-memory data store built for the cloud. It provides [automatic failover](https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/AutoFailover.html) and [automatic backup](https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/backups-automatic.html) features to ensure availability and durability.
 
 ### Google Cloud Memorystore for Redis
 

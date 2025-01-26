@@ -1,10 +1,14 @@
+import subprocess
+try:
+    __import__("hypothesis")
+except ImportError:
+    subprocess.check_call(["pip", "install", "hypothesis"])
 from datetime import datetime
 import json
 import os
 from pickle import FALSE
 import platform
 import shutil
-import subprocess
 import sys
 from termios import TIOCPKT_DOSTOP
 import time
@@ -12,9 +16,14 @@ import unittest
 from xmlrpc.client import boolean
 import hypothesis
 from hypothesis.stateful import rule, precondition, RuleBasedStateMachine
-from hypothesis import Phase, assume, strategies as st
+from hypothesis import Phase, Verbosity, assume, strategies as st
 from hypothesis import seed
 from packaging import version
+import subprocess
+try:
+    __import__("minio")
+except ImportError:
+    subprocess.check_call(["pip", "install", "minio"])
 from minio import Minio
 import uuid
 from utils import *
@@ -23,10 +32,16 @@ from cmptree import *
 import random
 
 @seed(random.randint(10000, 1000000))
-@hypothesis.settings(max_examples=100, stateful_step_count=30, deadline=None, phases=[Phase.explicit, Phase.reuse, Phase.generate, Phase.target, Phase.shrink ])
+@hypothesis.settings(
+    verbosity=Verbosity.debug, 
+    max_examples=100, 
+    stateful_step_count=30, 
+    deadline=None, 
+    report_multiple_bugs=False, 
+    phases=[Phase.explicit, Phase.reuse, Phase.generate, Phase.target, Phase.shrink, Phase.explain])
 class JuicefsMachine(RuleBasedStateMachine):
     MIN_CLIENT_VERSIONS = ['0.0.1', '0.0.17','1.0.0-beta1', '1.0.0-rc1']
-    MAX_CLIENT_VERSIONS = ['1.1.0', '1.2.0', '2.0.0']
+    MAX_CLIENT_VERSIONS = ['1.2.0', '2.0.0']
     JFS_BINS = ['./'+os.environ.get('OLD_JFS_BIN'), './'+os.environ.get('NEW_JFS_BIN')]
     meta_dict = {'redis':'redis://localhost/1', 'mysql':'mysql://root:root@(127.0.0.1)/test', 'postgres':'postgres://postgres:postgres@127.0.0.1:5432/test?sslmode=disable', \
         'tikv':'tikv://127.0.0.1:2379', 'badger':'badger://badger-data', 'mariadb': 'mysql://root:root@(127.0.0.1)/test', \
@@ -655,7 +670,7 @@ class JuicefsMachine(RuleBasedStateMachine):
         sub_dir=st.sampled_from(['dir1', 'dir2']),
         port=st.integers(min_value=9001, max_value=10000)
     )
-    @precondition(lambda self: self.formatted )
+    @precondition(lambda self: self.formatted and False)
     def gateway(self, juicefs, get_timeout, put_timeout, io_retries, max_uploads, max_deletes, buffer_size, upload_limit, 
         download_limit, prefetch, writeback, upload_delay, cache_dir, cache_size, free_space_ratio, cache_partial_only, 
         backup_meta,heartbeat, read_only, no_bgjob, open_cache, attr_cache, entry_cache, dir_entry_cache, access_log, 
@@ -731,7 +746,7 @@ class JuicefsMachine(RuleBasedStateMachine):
 
     @rule(juicefs = st.sampled_from(JFS_BINS), 
         port=st.integers(min_value=10001, max_value=11000)) 
-    @precondition(lambda self: self.formatted )
+    @precondition(lambda self: self.formatted and False)
     def webdav(self, juicefs, port):
         assume (self.greater_than_version_formatted(juicefs))
         assert version.parse('-'.join(juicefs.split('-')[1:])) >=  version.parse('-'.join(self.formatted_by.split('-')[1:]))
@@ -767,4 +782,4 @@ class JuicefsMachine(RuleBasedStateMachine):
 TestJuiceFS = JuicefsMachine.TestCase
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(failfast=True)

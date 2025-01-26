@@ -26,6 +26,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/fs"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/vfs"
 )
 
@@ -128,8 +129,11 @@ func testFileSystem(t *testing.T, s object.ObjectStorage) {
 		if target, err := ss.Readlink("a"); err != nil || target != "./xyz/ol1/" {
 			t.Fatalf("readlink a %s %s", target, err)
 		}
-		if err = ss.Symlink("./xyz/notExist/", "b"); err != nil {
+		if err = ss.Symlink("/xyz/notExist/", "b"); err != nil {
 			t.Fatalf("symlink b %s", err)
+		}
+		if target, err := ss.Readlink("b"); err != nil || target != "/xyz/notExist/" {
+			t.Fatalf("readlink b %s %s", target, err)
 		}
 		objs, err = listAll(s, "", "", 100)
 		if err != nil {
@@ -140,6 +144,12 @@ func testFileSystem(t *testing.T, s object.ObjectStorage) {
 			t.Fatalf("testKeysEqual fail: %s", err)
 		}
 	}
+
+	// put a file with very long name
+	longName := strings.Repeat("a", 255)
+	if err := s.Put("dir/"+longName, bytes.NewReader([]byte{0})); err != nil {
+		t.Fatalf("PUT a file with long name `%s` failed: %q", longName, err)
+	}
 }
 
 func TestJFS(t *testing.T) {
@@ -148,6 +158,7 @@ func TestJFS(t *testing.T) {
 		Name:      "test",
 		BlockSize: 4096,
 		Capacity:  1 << 30,
+		DirStats:  true,
 	}
 	_ = m.Init(format, true)
 	var conf = vfs.Config{
@@ -169,7 +180,7 @@ func TestJFS(t *testing.T) {
 		t.Fatalf("initialize  failed: %s", err)
 	}
 
-	jstore := &juiceFS{object.DefaultObjectStorage{}, "test", jfs}
+	jstore := &juiceFS{object.DefaultObjectStorage{}, "test", uint16(utils.GetUmask()), jfs}
 	testFileSystem(t, jstore)
 	testFileSystem(t, object.WithPrefix(jstore, "unittest/"))
 }

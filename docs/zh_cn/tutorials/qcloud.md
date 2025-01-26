@@ -1,6 +1,6 @@
 ---
 title: 在腾讯云使用 JuiceFS
-sidebar_position: 5
+sidebar_position: 8
 slug: /clouds/qcloud
 ---
 
@@ -10,7 +10,7 @@ slug: /clouds/qcloud
 
 这样的设计可以有效缩减对象存储在请求数量上的费用，同时也能让我们显著感受到 JuiceFS 带来的性能提升。
 
-![](../images/juicefs-qcloud.png)
+![JuiceFS-qcloud](../images/juicefs-qcloud.png)
 
 ## 准备
 
@@ -67,7 +67,7 @@ JuiceFS 会将数据对应的元数据全部存储在独立的数据库中，目
 
 注意，数据库的连接地址取决于你创建的 VPC 网络设置，创建 Redis 实例时会自动在你定义的网段中获取地址。
 
-![](../images/qcloud-redis-network.png)
+![qcloud-Redis-network](../images/qcloud-redis-network.png)
 
 ### 三、对象存储 COS
 
@@ -87,27 +87,13 @@ JuiceFS 会将所有的数据都存储到对象存储中，它支持几乎所有
 
 ## 安装
 
-我当前使用的是 Ubuntu Server 20.04 64 位系统，依次执行以下命令可以下载最新版本客户端。你也可以访问 [JuiceFS GitHub Releases](https://github.com/juicedata/juicefs/releases) 页面选择其他版本。
+我当前使用的是 Ubuntu Server 20.04 64 位系统，执行以下命令可以安装最新版本客户端。
 
 ```shell
-JFS_LATEST_TAG=$(curl -s https://api.github.com/repos/juicedata/juicefs/releases/latest | grep 'tag_name' | cut -d '"' -f 4 | tr -d 'v')
+curl -sSL https://d.juicefs.com/install | sh -
 ```
 
-```shell
-wget "https://github.com/juicedata/juicefs/releases/download/v${JFS_LATEST_TAG}/juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz"
-```
-
-下载完成以后，解压程序到 `juice` 文件夹：
-
-```shell
-mkdir juice && tar -zxvf "juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz" -C juice
-```
-
-将 JuiceFS 客户端安装到 `/usr/local/bin` ：
-
-```shell
-sudo install juice/juicefs /usr/local/bin
-```
+你也可以访问 [JuiceFS GitHub Releases](https://github.com/juicedata/juicefs/releases) 页面选择其他版本。
 
 执行命令，看到返回 `juicefs` 的命令帮助信息，代表客户端安装成功。
 
@@ -174,7 +160,7 @@ $ juicefs format \
 
 **选项说明：**
 
-- `--storage`：指定对象存储类型，[点此查看](../guide/how_to_set_up_object_storage.md#supported-object-storage) JuiceFS 支持的对象存储。
+- `--storage`：指定对象存储类型，[点此查看](../reference/how_to_set_up_object_storage.md#supported-object-storage) JuiceFS 支持的对象存储。
 - `--bucket`：对象存储的 Bucket 访问域名，可以在 COS 的管理控制台找到。
   ![cos-bucket-url](../images/cos-bucket-url.png)
 - `--access-key` 和 `--secret-key`：访问对象存储 API 的秘钥对，[点此查看](https://cloud.tencent.com/document/product/598/37140)获取方式。
@@ -283,22 +269,4 @@ sudo juicefs umount /mnt/jfs
 
 ## 开机自动挂载
 
-如果你不想每次重启系统都要重新手动挂载 JuiceFS 存储，可以设置自动挂载文件系统。
-
-首先，需要将  `juicefs` 客户端重命名为 `mount.juicefs` 并复制到 `/sbin/` 目录：
-
-```shell
-sudo cp juice/juicefs /sbin/mount.juicefs
-```
-
-编辑 `/etc/fstab` 配置文件，新增一条记录：
-
-```shell
-redis://:<your-redis-password>@192.168.5.5:6379/1    /mnt/jfs       juicefs     _netdev,cache-size=20480     0  0
-```
-
-挂载选项中 `cache-size=20480` 代表分配 20GB 本地磁盘空间作为 JuiceFS 的缓存使用，请根据你实际的 CVM 硬盘容量去决定分配的缓存大小。一般来说，为 JuiceFS 分配更大的缓存空间，可以获得更好的性能表现。
-
-你可以根据需要调整上述配置中的 FUSE 挂载选项，更多内容请[查阅文档](../reference/fuse_mount_options.md)。
-
-> **注意**：请将上述配置文件中的 Redis 地址、挂载点以及挂载选项，替换成你实际的信息。
+请参考[「启动时自动挂载 JuiceFS」](../administration/mount_at_boot.md)

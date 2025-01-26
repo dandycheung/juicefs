@@ -44,7 +44,9 @@ func testKeysEqual(objs []Object, expectedKeys []string) error {
 }
 
 func TestDisk2(t *testing.T) {
-	s, _ := newDisk("/tmp/abc/", "", "", "")
+	diskPath := "/tmp/abc/"
+	_ = os.RemoveAll(diskPath)
+	s, _ := newDisk(diskPath, "", "", "")
 	s = WithPrefix(s, "prefix/")
 	testFileSystem(t, s)
 }
@@ -64,8 +66,19 @@ func TestHDFS2(t *testing.T) { //skip mutate
 	if os.Getenv("HDFS_ADDR") == "" {
 		t.Skip()
 	}
-	dfs, _ := newHDFS(os.Getenv("HDFS_ADDR"), "", "", "")
+	dfs, _ := newHDFS(os.Getenv("HDFS_ADDR"), "testUser1", "", "")
 	testFileSystem(t, dfs)
+}
+
+func TestNFS2(t *testing.T) { //skip mutate
+	if os.Getenv("NFS_ADDR") == "" {
+		t.SkipNow()
+	}
+	b, err := newNFSStore(os.Getenv("NFS_ADDR"), os.Getenv("NFS_ACCESS_KEY"), os.Getenv("NFS_SECRET_KEY"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testFileSystem(t, b)
 }
 
 func testFileSystem(t *testing.T, s ObjectStorage) {
@@ -78,7 +91,7 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 	}
 	// initialize directory tree
 	for _, key := range keys {
-		if err := s.Put(key, bytes.NewReader([]byte{})); err != nil {
+		if err := s.Put(key, bytes.NewReader([]byte{'a', 'b'})); err != nil {
 			t.Fatalf("PUT object `%s` failed: %q", key, err)
 		}
 	}
@@ -92,7 +105,7 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 	// cleanup
 	defer func() {
 		// delete reversely, directory only can be deleted when it's empty
-		objs, err := listAll(s, "", "", 100)
+		objs, err := listAll(s, "", "", 100, true)
 		if err != nil {
 			t.Fatalf("listall failed: %s", err)
 		}
@@ -107,7 +120,7 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 			}
 		}
 	}()
-	objs, err := listAll(s, "x/", "", 100)
+	objs, err := listAll(s, "x/", "", 100, true)
 	if err != nil {
 		t.Fatalf("list failed: %s", err)
 	}
@@ -116,7 +129,7 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 		t.Fatalf("testKeysEqual fail: %s", err)
 	}
 
-	objs, err = listAll(s, "x", "", 100)
+	objs, err = listAll(s, "x", "", 100, true)
 	if err != nil {
 		t.Fatalf("list failed: %s", err)
 	}
@@ -125,7 +138,38 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 		t.Fatalf("testKeysEqual fail: %s", err)
 	}
 
-	objs, err = listAll(s, "xy", "", 100)
+	if ss, ok := s.(FileSystem); ok {
+		for _, mode := range []uint32{0022, 0122, 0422} {
+			t.Logf("test mode %o", os.FileMode(mode))
+			err := ss.Chmod("x/", os.FileMode(mode))
+			if err != nil {
+				t.Fatalf("chmod %ofailed: %s", mode, err)
+			}
+
+			objs, err = listAll(s, "x", "", 100, true)
+			if err != nil {
+				t.Fatalf("list failed: %s mode %o", err, mode)
+			}
+			expectedKeys = []string{"x/", "xy.txt", "xyz/", "xyz/xyz.txt"}
+			if _, ok := ss.(*nfsStore); ok {
+				expectedKeys = []string{"x/", "x/x.txt", "xy.txt", "xyz/", "xyz/xyz.txt"}
+			}
+			if mode == 0422 {
+				if strings.HasPrefix(s.String(), "gluster://") {
+					expectedKeys = []string{"x/", "x/x.txt", "xy.txt", "xyz/", "xyz/xyz.txt"}
+				}
+			}
+			if err = testKeysEqual(objs, expectedKeys); err != nil {
+				t.Fatalf("testKeysEqual fail: %s mode %o", err, mode)
+			}
+			err = ss.Chmod("x/", os.FileMode(0777))
+			if err != nil {
+				t.Fatalf("chmod %o failed: %s", mode, err)
+			}
+		}
+	}
+
+	objs, err = listAll(s, "xy", "", 100, true)
 	if err != nil {
 		t.Fatalf("list failed: %s", err)
 	}
@@ -159,7 +203,7 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 		}
 		_ = ss.Symlink("xyz/notExist/", "b")
 
-		objs, err = listAll(s, "", "", 100)
+		objs, err = listAll(s, "", "", 100, true)
 		if err != nil {
 			t.Fatalf("listall failed: %s", err)
 		}
@@ -173,5 +217,20 @@ func testFileSystem(t *testing.T, s ObjectStorage) {
 		if objs[9].Size() != 10 {
 			t.Fatalf("size of target(file) should be 10")
 		}
+
+		// test don't follow symlink
+		if _, ok := s.(*hdfsclient); !ok {
+			objs, err = listAll(s, "", "", 100, false)
+			expectedKeys = []string{"", "a", "a-", "a0", "b", "b-", "b0", "bb/", "bb/b1", "x/", "x/x.txt", "xy.txt", "xyz/", "xyz/ol1/", "xyz/ol1/p.txt", "xyz/xyz.txt"}
+			if err = testKeysEqual(objs, expectedKeys); err != nil {
+				t.Fatalf("testKeysEqual fail: %s", err)
+			}
+		}
+	}
+
+	// put a file with very long name
+	longName := strings.Repeat("a", 255)
+	if err := s.Put("dir/"+longName, bytes.NewReader([]byte{0})); err != nil {
+		t.Fatalf("PUT a file with long name `%s` failed: %q", longName, err)
 	}
 }

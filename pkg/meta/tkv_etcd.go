@@ -151,10 +151,9 @@ func (tx *etcdTxn) set(key, value []byte) {
 	}
 }
 
-func (tx *etcdTxn) append(key []byte, value []byte) []byte {
+func (tx *etcdTxn) append(key []byte, value []byte) {
 	new := append(tx.get(key), value...)
 	tx.set(key, new)
-	return new
 }
 
 func (tx *etcdTxn) incrBy(key []byte, value int64) int64 {
@@ -213,8 +212,11 @@ func (c *etcdClient) shouldRetry(err error) bool {
 	return errors.Is(err, conflicted)
 }
 
-func (c *etcdClient) txn(f func(*kvTxn) error, retry int) (err error) {
-	ctx := context.Background()
+func (c *etcdClient) config(key string) interface{} {
+	return nil
+}
+
+func (c *etcdClient) txn(ctx context.Context, f func(*kvTxn) error, retry int) (err error) {
 	tx := &etcdTxn{
 		ctx,
 		c.kv,
@@ -332,6 +334,7 @@ func newEtcdClient(addr string) (tkvClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxCompactSlices = 100
 	var prefix string = u.Path + "\xFD"
 	return withPrefix(&etcdClient{c, etcd.NewKV(c)}, []byte(prefix)), nil
 }

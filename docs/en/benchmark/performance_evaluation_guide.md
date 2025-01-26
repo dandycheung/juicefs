@@ -34,13 +34,15 @@ JuiceFS v1.0+ has Trash enabled by default, which means the benchmark tools will
 
 ### `juicefs bench`
 
-The [`juicefs bench`](../reference/command_reference.md#bench) command can help you do a quick performance test on a standalone machine. With the test results, it is easy to evaluate if your environment configuration and JuiceFS performance are normal. Assuming you have mounted JuiceFS to `/mnt/jfs` on your server, execute the following command for this test (the `-p` option is recommended to set to the number of CPU cores on the server). If you need help with initializing or mounting JuiceFS, please refer to the [Quick Start Guide](../getting-started/README.md))
+The [`juicefs bench`](../reference/command_reference.mdx#bench) command can help you do a quick performance test on a standalone machine. With the test results, it is easy to evaluate if your environment configuration and JuiceFS performance are normal. Assuming you have mounted JuiceFS to `/mnt/jfs` on your server, execute the following command for this test (the `-p` option is recommended to set to the number of CPU cores on the server). If you need help with initializing or mounting JuiceFS, please refer to [Create a File System](../getting-started/standalone.md#juicefs-format).
 
 ```bash
 juicefs bench /mnt/jfs -p 4
 ```
 
-The test results will show each performance indicator in green, yellow or red. If you see red indicators in your results, please check the relevant configuration first. Feel free to post any problems you encountered in detail on [GitHub Discussions](https://github.com/juicedata/juicefs/discussions).
+The test results are presented in a table format, where `ITEM` represents the tested item, `VALUE` represents the processing capacity per second (throughput, number of files, number of operations, etc.), and `COST` represents the time required for each file or operation.
+
+The results will be displayed in green, yellow, or red to differentiate performance. If there are red indicators in your results, please check the relevant configurations first. Feel free to post any problems you encountered in detail on [GitHub Discussions](https://github.com/juicedata/juicefs/discussions).
 
 ![bench](../images/bench-guide-bench.png)
 
@@ -77,7 +79,7 @@ The data above is from [AWS official documentation](https://docs.aws.amazon.com/
 
 ### `juicefs objbench`
 
-The [`juicefs objbench`](../reference/command_reference.md#objbench) command can run some tests on object storage to evaluate how well it performs as a backend storage for JuiceFS. Take testing Amazon S3 as an example:
+The [`juicefs objbench`](../reference/command_reference.mdx#objbench) command can run some tests on object storage to evaluate how well it performs as a backend storage for JuiceFS. Take testing Amazon S3 as an example:
 
 ```bash
 juicefs objbench \
@@ -90,6 +92,8 @@ juicefs objbench \
 The test results are shown in the figure below:
 
 ![JuiceFS Bench](../images/objbench.png)
+
+Among them, the result `not support` indicates that the tested object storage does not support this feature.
 
 #### Test flow
 
@@ -140,7 +144,7 @@ juicefs stats /mnt/jfs --verbosity 1
 
 The results are shown below, which would be easier to understand when combing with the `bench` performance test flows described above.
 
-![](../images/bench-guide-stats.png)
+![bench-guide-stats](../images/bench-guide-stats.png)
 
 Learn the meaning of indicators in [`juicefs stats`](../administration/fault_diagnosis_and_analysis.md#stats).
 

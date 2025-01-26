@@ -1,8 +1,16 @@
 name: tpcds
 
 on:
-  schedule:
-    - cron:  '30 20 * * *'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - '**/tpcds.yml'
+  pull_request:
+    branches:
+      - 'main'
+    paths:
+      - '**/tpcds.yml'
   workflow_dispatch:
     inputs:
       debug:
@@ -10,6 +18,8 @@ on:
         description: "Run the build with tmate debugging enabled"
         required: false
         default: false
+  schedule:
+    - cron:  '0 17 * * *'
 
 jobs:
   tpcds:
@@ -41,6 +51,7 @@ jobs:
           fetch-depth: 1
 
       - name: Build
+        timeout-minutes: 10
         uses: ./.github/actions/build
 
       - name: Cache local Maven repository
@@ -62,10 +73,12 @@ jobs:
       - name: Set up Spark
         working-directory: /tmp
         run: |
-          spark_version=3.3.2
-          wget -q https://dlcdn.apache.org/spark/spark-$spark_version/spark-$spark_version-bin-hadoop3.tgz
-          tar -zxf spark-$spark_version-bin-hadoop3.tgz
-          ln -s spark-$spark_version-bin-hadoop3 spark
+          curl https://dlcdn.apache.org/spark/ > a.html
+          spark_version=$(grep -oP '(?<=href=")spark-[^/]+(?=/")' a.html | grep -v preview | tail -1)
+          echo "spark_version is $spark_version"
+          wget -q https://dlcdn.apache.org/spark/$spark_version/$spark_version-bin-hadoop3.tgz
+          tar -zxf $spark_version-bin-hadoop3.tgz
+          ln -s $spark_version-bin-hadoop3 spark
           cp ~/work/juicefs/juicefs/sdk/java/target/juicefs-hadoop*jar /tmp/spark/jars
           cp ~/work/juicefs/juicefs/.github/workflows/resources/core-site.xml /tmp/spark/conf
           export PATH=$PATH:/tmp/spark/bin:/tmp/spark/sbin
@@ -149,7 +162,7 @@ jobs:
           -i ~/work/juicefs/juicefs/.github/workflows/resources/tpcds_run.scala
           
       - name: Log
-        if: ${{ always() }}
+        if: always()
         run: |
           if [ -f /var/log/juicefs.log ]; then
             echo "juicefs log"
@@ -158,13 +171,13 @@ jobs:
           fi
 
       - name: Send Slack Notification
-        if: ${{ failure() }}
+        if: failure() 
         uses: juicedata/slack-notify-action@main
         with:
           channel-id: "${{ secrets.SLACK_CHANNEL_ID_FOR_PR_CHECK_NOTIFY }}"
           slack_bot_token: "${{ secrets.SLACK_BOT_TOKEN }}"  
 
       - name: Setup upterm session
-        if: ${{ failure() && github.event_name == 'workflow_dispatch' && github.event.inputs.debug }}
+        if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
         timeout-minutes: 60
         uses: lhotari/action-upterm@v1

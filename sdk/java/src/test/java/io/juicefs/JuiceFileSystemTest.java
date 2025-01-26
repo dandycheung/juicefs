@@ -16,13 +16,14 @@
 
 package io.juicefs;
 
+import com.google.common.collect.Lists;
+import io.juicefs.utils.AclTransformation;
 import junit.framework.TestCase;
 import org.apache.commons.io.IOUtils;
 import org.apache.flink.runtime.fs.hdfs.HadoopRecoverableWriter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.*;
-import org.apache.hadoop.fs.permission.FsAction;
-import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.permission.*;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -30,16 +31,24 @@ import org.apache.hadoop.security.UserGroupInformation;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.security.PrivilegedExceptionAction;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_CHECKPOINT_INTERVAL_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_INTERVAL_KEY;
+import static org.apache.hadoop.fs.permission.AclEntryScope.ACCESS;
+import static org.apache.hadoop.fs.permission.AclEntryScope.DEFAULT;
+import static org.apache.hadoop.fs.permission.AclEntryType.*;
+import static org.apache.hadoop.fs.permission.FsAction.*;
 import static org.junit.Assert.assertArrayEquals;
 
 public class JuiceFileSystemTest extends TestCase {
@@ -66,6 +75,7 @@ public class JuiceFileSystemTest extends TestCase {
 
   public void tearDown() throws Exception {
     fs.close();
+    FileSystem.closeAll();
   }
 
   public void testFsStatus() throws IOException {
@@ -441,6 +451,20 @@ public class JuiceFileSystemTest extends TestCase {
      */
   }
 
+  public void testInputStreamSkipNBytes() throws Exception {
+    Path f = new Path("/test-skipnbytes");
+    try (FSDataOutputStream out = fs.create(f)) {
+      out.writeBytes("hello juicefs");
+    }
+    Class<JuiceFileSystemImpl.FileInputStream> inputStreamClass = JuiceFileSystemImpl.FileInputStream.class;
+    Method skipNBytes = inputStreamClass.getMethod("skipNBytes", long.class);
+    try (FSDataInputStream in = fs.open(f)) {
+      skipNBytes.invoke(in.getWrappedStream(), 6);
+      String s = IOUtils.toString(in);
+      assertEquals("juicefs", s);
+    }
+  }
+
   public void testReadStats() throws IOException {
     FileSystem.Statistics statistics = FileSystem.getStatistics(fs.getScheme(),
             ((FilterFileSystem) fs).getRawFileSystem().getClass());
@@ -644,6 +668,7 @@ public class JuiceFileSystemTest extends TestCase {
     writeFile(fs, groups1, "group1:3001:user1\n");
     writeFile(fs, users2, "user2:2001\n");
     writeFile(fs, groups2, "group2:3001:user2\n");
+    fs.close();
 
     Configuration conf = new Configuration(cfg);
     conf.set("juicefs.users", users1.toUri().getPath());
@@ -732,14 +757,43 @@ public class JuiceFileSystemTest extends TestCase {
     Path f = new Path("/test_foo");
     fooFs.create(f).close();
     assertEquals("foo", fooFs.getFileStatus(f).getOwner());
+    fooFs.close();
 
     ou = fs.create(new Path("/etc/users"));
     ou.write("foo:10001\n".getBytes());
     ou.close();
-    FileSystem newFS = FileSystem.newInstance(newConf);
-    assertEquals("10000", fooFs.getFileStatus(f).getOwner());
+    fs.close();
 
-    fooFs.delete(f, false);
+    FileSystem newFS = FileSystem.newInstance(newConf);
+    assertEquals("10000", newFS.getFileStatus(f).getOwner());
+    newFS.delete(f, false);
+    newFS.close();
+  }
+
+  public void testGuidMappingFromString() throws Exception {
+    fs.close();
+    Configuration newConf = new Configuration(cfg);
+
+    newConf.set("juicefs.users", "bar:10000;foo:20000;baz:30000");
+    newConf.set("juicefs.groups", "user:1000:foo,bar;admin:2000:baz");
+    newConf.set("juicefs.superuser", UserGroupInformation.getCurrentUser().getShortUserName());
+
+    FileSystem fooFs = createNewFs(newConf, "foo", new String[]{"nogrp"});
+    Path f = new Path("/test_foo");
+    fooFs.create(f).close();
+    fooFs.setOwner(f, "foo", "user");
+    assertEquals("foo", fooFs.getFileStatus(f).getOwner());
+    assertEquals("user", fooFs.getFileStatus(f).getGroup());
+    fooFs.close();
+
+    newConf.set("juicefs.users", "foo:20001");
+    newConf.set("juicefs.groups", "user:1001:foo,bar;admin:2001:baz");
+    FileSystem newFS = FileSystem.newInstance(newConf);
+    assertEquals("20000", newFS.getFileStatus(f).getOwner());
+    assertEquals("1000", newFS.getFileStatus(f).getGroup());
+
+    newFS.delete(f, false);
+    newFS.close();
   }
 
   public void testTrash() throws Exception {
@@ -893,5 +947,256 @@ public class JuiceFileSystemTest extends TestCase {
     FileStatus status = fs.getFileStatus(new Path("/inner_sym_link"));
     assertEquals("inner_sym_link", status.getPath().getName());
     assertEquals(14, status.getLen());
+  }
+
+  public void testUserWithMultiGroups() throws Exception {
+    Path users = new Path("/etc/users");
+    Path groups = new Path("/etc/groups_multi");
+
+    writeFile(fs, users, "tom:2001\n");
+    writeFile(fs, groups, "groupa:3001:tom\ngroupb:3002:tom");
+    fs.close();
+
+    Configuration conf = new Configuration(cfg);
+    conf.set("juicefs.users", users.toUri().getPath());
+    conf.set("juicefs.groups", groups.toUri().getPath());
+    conf.set("juicefs.debug", "true");
+
+    FileSystem superFs = createNewFs(conf, "hdfs", new String[]{"hadoop"});
+    Path testDir = new Path("/test_multi_group/d1");
+    superFs.mkdirs(testDir);
+    superFs.setOwner(testDir.getParent(), "hdfs", "groupb");
+    superFs.setOwner(testDir, "hdfs", "groupb");
+    superFs.setPermission(testDir.getParent(), FsPermission.createImmutable((short) 0770));
+    superFs.setPermission(testDir, FsPermission.createImmutable((short) 0770));
+
+    FileSystem tomFs = createNewFs(conf, "tom", new String[]{"randgroup"});
+    tomFs.listStatus(testDir);
+
+    superFs.delete(testDir.getParent(), true);
+    tomFs.close();
+    superFs.close();
+  }
+
+  public void testConcurrentCreate() throws Exception {
+    int threads = 100;
+    ExecutorService pool = Executors.newFixedThreadPool(threads);
+    for (int i = 0; i < threads; i++) {
+      pool.submit(() -> {
+        JuiceFileSystem jfs = new JuiceFileSystem();
+        try {
+          jfs.initialize(URI.create("jfs://dev/"), cfg);
+          jfs.listStatus(new Path("/"));
+          jfs.close();
+        } catch (IOException e) {
+          fail("concurrent create failed");
+          System.exit(1);
+        }
+      });
+    }
+    pool.shutdown();
+    pool.awaitTermination(1, TimeUnit.MINUTES);
+  }
+
+  private boolean tryAccess(Path path, String user, String[] group, FsAction action) throws Exception {
+    UserGroupInformation testUser = UserGroupInformation.createUserForTesting(user, group);
+    FileSystem fs = testUser.doAs((PrivilegedExceptionAction<FileSystem>) () -> {
+      Configuration conf = new Configuration();
+      conf.set("juicefs.grouping", "");
+      return FileSystem.get(conf);
+    });
+
+    boolean canAccess;
+    try {
+      fs.access(path, action);
+      canAccess = true;
+    } catch (AccessControlException e) {
+      canAccess = false;
+    }
+    return canAccess;
+  }
+  static AclEntry aclEntry(AclEntryScope scope, AclEntryType type, FsAction permission) {
+    return new AclEntry.Builder().setScope(scope).setType(type).setPermission(permission).build();
+  }
+
+  static AclEntry aclEntry(AclEntryScope scope, AclEntryType type, String name, FsAction permission) {
+    return new AclEntry.Builder().setScope(scope).setType(type).setName(name).setPermission(permission).build();
+  }
+
+  public void testAcl() throws Exception {
+    List<AclEntry> acls = Lists.newArrayList(
+        aclEntry(DEFAULT, USER, "foo", ALL)
+    );
+    Path p = new Path("/testacldir");
+    fs.delete(p, true);
+    fs.mkdirs(p);
+    fs.setAcl(p, acls);
+    Path childFile = new Path(p, "file");
+    fs.create(childFile).close();
+    assertTrue(tryAccess(childFile, "foo", new String[]{"nogrp"}, WRITE));
+    assertFalse(tryAccess(childFile, "wrong", new String[]{"nogrp"}, WRITE));
+    assertEquals(fs.getFileStatus(childFile).getPermission().getGroupAction(), READ_WRITE);
+
+    Path childDir = new Path(p, "dir");
+    fs.mkdirs(childDir);
+    assertEquals(fs.getFileStatus(childDir).getPermission().getGroupAction(), ALL);
+  }
+
+  public void testAclException() throws Exception {
+    List<AclEntry> acls = Lists.newArrayList(
+        aclEntry(ACCESS, USER, "foo", ALL)
+    );
+    Path p = new Path("/test_acl_exception");
+    fs.delete(p, true);
+    fs.mkdirs(p);
+    try {
+      fs.setAcl(p, acls);
+      fail("Invalid ACL: the user, group and other entries are required.");
+    } catch (AclTransformation.AclException ignored) {
+    }
+  }
+
+  public void testDefaultAclExistingDirFile() throws Exception {
+    Path parent = new Path("/testDefaultAclExistingDirFile");
+    fs.delete(parent, true);
+    fs.mkdirs(parent);
+    // the old acls
+    List<AclEntry> acls1 = Lists.newArrayList(aclEntry(DEFAULT, USER, "foo", ALL));
+    // the new acls
+    List<AclEntry> acls2 = Lists.newArrayList(aclEntry(DEFAULT, USER, "foo", READ_EXECUTE));
+    // set parent to old acl
+    fs.setAcl(parent, acls1);
+
+    Path childDir = new Path(parent, "childDir");
+    fs.mkdirs(childDir);
+    // the sub directory should also have the old acl
+    AclEntry[] childDirExpectedAcl = new AclEntry[] { aclEntry(ACCESS, USER, "foo", ALL),
+        aclEntry(ACCESS, GROUP, READ_EXECUTE), aclEntry(DEFAULT, USER, ALL),
+        aclEntry(DEFAULT, USER, "foo", ALL), aclEntry(DEFAULT, GROUP, READ_EXECUTE),
+        aclEntry(DEFAULT, MASK, ALL), aclEntry(DEFAULT, OTHER, READ_EXECUTE) };
+    AclStatus childDirAcl = fs.getAclStatus(childDir);
+    assertArrayEquals(childDirExpectedAcl, childDirAcl.getEntries().toArray());
+
+    Path childFile = new Path(childDir, "childFile");
+    // the sub file should also have the old acl
+    fs.create(childFile).close();
+    AclEntry[] childFileExpectedAcl = new AclEntry[] { aclEntry(ACCESS, USER, "foo", ALL),
+        aclEntry(ACCESS, GROUP, READ_EXECUTE) };
+    AclStatus childFileAcl = fs.getAclStatus(childFile);
+    assertArrayEquals(childFileExpectedAcl, childFileAcl.getEntries().toArray());
+
+    // now change parent to new acls
+    fs.setAcl(parent, acls2);
+
+    // sub directory and sub file should still have the old acls
+    childDirAcl = fs.getAclStatus(childDir);
+    assertArrayEquals(childDirExpectedAcl, childDirAcl.getEntries().toArray());
+    childFileAcl = fs.getAclStatus(childFile);
+    assertArrayEquals(childFileExpectedAcl, childFileAcl.getEntries().toArray());
+
+    // now remove the parent acls
+    fs.removeAcl(parent);
+
+    // sub directory and sub file should still have the old acls
+    childDirAcl = fs.getAclStatus(childDir);
+    assertArrayEquals(childDirExpectedAcl, childDirAcl.getEntries().toArray());
+    childFileAcl = fs.getAclStatus(childFile);
+    assertArrayEquals(childFileExpectedAcl, childFileAcl.getEntries().toArray());
+
+    // check changing the access mode of the file
+    // mask out the access of group other for testing
+    fs.setPermission(childFile, new FsPermission((short) 0640));
+    boolean canAccess = tryAccess(childFile, "other", new String[] { "other" }, READ);
+    assertFalse(canAccess);
+    fs.delete(parent, true);
+  }
+
+  public void testAccessAclNotInherited() throws IOException {
+    Path parent = new Path("/testAccessAclNotInherited");
+    fs.delete(parent, true);
+    fs.mkdirs(parent);
+    // parent have both access acl and default acl
+    List<AclEntry> acls = Lists.newArrayList(aclEntry(DEFAULT, USER, "foo", READ_EXECUTE),
+        aclEntry(ACCESS, USER, ALL), aclEntry(ACCESS, GROUP, READ), aclEntry(ACCESS, OTHER, READ),
+        aclEntry(ACCESS, USER, "bar", ALL));
+    fs.setAcl(parent, acls);
+    AclEntry[] expectedAcl = new AclEntry[] { aclEntry(ACCESS, USER, "bar", ALL), aclEntry(ACCESS, GROUP, READ),
+        aclEntry(DEFAULT, USER, ALL), aclEntry(DEFAULT, USER, "foo", READ_EXECUTE),
+        aclEntry(DEFAULT, GROUP, READ), aclEntry(DEFAULT, MASK, READ_EXECUTE), aclEntry(DEFAULT, OTHER, READ) };
+    AclStatus dirAcl = fs.getAclStatus(parent);
+    assertArrayEquals(expectedAcl, dirAcl.getEntries().toArray());
+
+    Path childDir = new Path(parent, "childDir");
+    fs.mkdirs(childDir);
+    // subdirectory should only have the default acl inherited
+    AclEntry[] childDirExpectedAcl = new AclEntry[] { aclEntry(ACCESS, USER, "foo", READ_EXECUTE),
+        aclEntry(ACCESS, GROUP, READ), aclEntry(DEFAULT, USER, ALL),
+        aclEntry(DEFAULT, USER, "foo", READ_EXECUTE), aclEntry(DEFAULT, GROUP, READ),
+        aclEntry(DEFAULT, MASK, READ_EXECUTE), aclEntry(DEFAULT, OTHER, READ) };
+    AclStatus childDirAcl = fs.getAclStatus(childDir);
+    assertArrayEquals(childDirExpectedAcl, childDirAcl.getEntries().toArray());
+
+    Path childFile = new Path(parent, "childFile");
+    fs.create(childFile).close();
+    // sub file should only have the default acl inherited
+    AclEntry[] childFileExpectedAcl = new AclEntry[] { aclEntry(ACCESS, USER, "foo", READ_EXECUTE),
+        aclEntry(ACCESS, GROUP, READ) };
+    AclStatus childFileAcl = fs.getAclStatus(childFile);
+    assertArrayEquals(childFileExpectedAcl, childFileAcl.getEntries().toArray());
+
+    fs.delete(parent, true);
+  }
+
+  public void testFileStatusWithAcl() throws Exception {
+    List<AclEntry> acls = Lists.newArrayList(
+        aclEntry(ACCESS, USER, ALL),
+        aclEntry(ACCESS, USER, "foo", ALL),
+        aclEntry(ACCESS, OTHER, ALL),
+        aclEntry(ACCESS, GROUP, ALL)
+    );
+    Path p = new Path("/test_acl_status");
+    fs.delete(p, true);
+    fs.mkdirs(p);
+    FileStatus pStatus = fs.getFileStatus(p);
+    assertFalse(pStatus.hasAcl());
+
+    Path f = new Path(p, "f");
+    fs.create(f).close();
+    fs.setAcl(f, acls);
+    FileStatus[] fileStatuses = fs.listStatus(p);
+    assertTrue(fileStatuses[0].getPermission().getAclBit());
+    assertTrue(fileStatuses[0].hasAcl());
+  }
+
+  public void testRenameAccessControlException() throws Exception {
+    Path d1 = new Path("/renameAccessControlExceptionDir1");
+    Path d2 = new Path("/renameAccessControlExceptionDir2");
+    Path p = new Path(d1, "file");
+    FileSystem user1Fs = createNewFs(cfg, "user1", new String[]{"group1"});
+
+    user1Fs.mkdirs(d1);
+    user1Fs.mkdirs(d2);
+    user1Fs.create(p).close();
+    user1Fs.setPermission(d1, new FsPermission((short) 0000));
+    user1Fs.setPermission(d2, new FsPermission((short) 0777));
+    try {
+      user1Fs.rename(p, d2);
+    } catch (AccessControlException e) {
+      assertTrue(e.getMessage().contains("renameAccessControlExceptionDir1"));
+    }
+
+    user1Fs.setPermission(d1, new FsPermission((short) 0777));
+    user1Fs.setPermission(d2, new FsPermission((short) 000));
+    try {
+      user1Fs.rename(p, d2);
+    } catch (AccessControlException e) {
+      assertTrue(e.getMessage().contains("renameAccessControlExceptionDir2"));
+    }
+
+    // clean
+    user1Fs.setPermission(d1, new FsPermission((short) 0777));
+    user1Fs.setPermission(d2, new FsPermission((short) 0777));
+    user1Fs.delete(d1, true);
+    user1Fs.delete(d2, true);
   }
 }

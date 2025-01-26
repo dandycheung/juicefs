@@ -23,9 +23,7 @@ import (
 	"math/rand"
 	"os"
 	"path"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,7 +38,6 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 )
 
-var skipDir syscall.Errno = 100000
 var dirSuffix = "/"
 
 func toError(eno syscall.Errno) error {
@@ -52,8 +49,9 @@ func toError(eno syscall.Errno) error {
 
 type juiceFS struct {
 	object.DefaultObjectStorage
-	name string
-	jfs  *fs.FileSystem
+	name  string
+	umask uint16
+	jfs   *fs.FileSystem
 }
 
 func (j *juiceFS) String() string {
@@ -97,8 +95,8 @@ func (f *jFile) Close() error {
 	return toError(f.f.Close(ctx))
 }
 
-func (j *juiceFS) Get(key string, off, limit int64) (io.ReadCloser, error) {
-	f, err := j.jfs.Open(ctx, j.path(key), 0)
+func (j *juiceFS) Get(key string, off, limit int64, getters ...object.AttrGetter) (io.ReadCloser, error) {
+	f, err := j.jfs.Open(ctx, j.path(key), vfs.MODE_MASK_R)
 	if err != 0 {
 		return nil, err
 	}
@@ -118,28 +116,46 @@ var bufPool = sync.Pool{
 	},
 }
 
-func (j *juiceFS) Put(key string, in io.Reader) (err error) {
+func (j *juiceFS) Put(key string, in io.Reader, getters ...object.AttrGetter) (err error) {
+	if vfs.IsSpecialName(key) {
+		return fmt.Errorf("skip special file %s for jfs: %w", key, utils.ErrSkipped)
+	}
 	p := j.path(key)
 	if strings.HasSuffix(p, "/") {
-		eno := j.jfs.MkdirAll(ctx, p, 0755)
+		eno := j.jfs.MkdirAll(ctx, p, 0777, j.umask)
 		return toError(eno)
 	}
-	tmp := filepath.Join(filepath.Dir(p), "."+filepath.Base(p)+".tmp"+strconv.Itoa(rand.Int()))
-	f, eno := j.jfs.Create(ctx, tmp, 0755)
-	if eno == syscall.ENOENT {
-		_ = j.jfs.MkdirAll(ctx, filepath.Dir(tmp), 0755)
-		f, eno = j.jfs.Create(ctx, tmp, 0755)
+	var tmp string
+	if object.PutInplace {
+		tmp = p
+	} else {
+		name := path.Base(p)
+		if len(name) > 200 {
+			name = name[:200]
+		}
+		tmp = path.Join(path.Dir(p), fmt.Sprintf(".%s.tmp.%d", name, rand.Int()))
+		defer func() {
+			if err != nil {
+				if e := j.jfs.Delete(ctx, tmp); e != 0 {
+					logger.Warnf("Failed to delete %s: %s", tmp, e)
+				}
+			}
+		}()
 	}
+	f, eno := j.jfs.Open(ctx, tmp, vfs.MODE_MASK_W)
+	if eno == syscall.ENOENT {
+		_ = j.jfs.MkdirAll(ctx, path.Dir(tmp), 0777, j.umask)
+		f, eno = j.jfs.Create(ctx, tmp, 0666, j.umask)
+	}
+
+	if eno == syscall.EEXIST {
+		_ = j.jfs.Delete(ctx, path.Dir(tmp))
+		f, eno = j.jfs.Create(ctx, tmp, 0666, j.umask)
+	}
+
 	if eno != 0 {
 		return toError(eno)
 	}
-	defer func() {
-		if err != nil {
-			if e := j.jfs.Delete(ctx, tmp); e != 0 {
-				logger.Warnf("Failed to delete %s: %s", tmp, e)
-			}
-		}
-	}()
 	buf := bufPool.Get().(*[]byte)
 	defer bufPool.Put(buf)
 	_, err = io.CopyBuffer(&jFile{f, 0}, in, *buf)
@@ -150,14 +166,15 @@ func (j *juiceFS) Put(key string, in io.Reader) (err error) {
 	if eno != 0 {
 		return toError(eno)
 	}
-	eno = j.jfs.Rename(ctx, tmp, p, 0)
-	if eno != 0 {
-		return toError(eno)
+	if !object.PutInplace {
+		if eno = j.jfs.Rename(ctx, tmp, p, 0); eno != 0 {
+			return toError(eno)
+		}
 	}
 	return nil
 }
 
-func (j *juiceFS) Delete(key string) error {
+func (j *juiceFS) Delete(key string, getters ...object.AttrGetter) error {
 	if key == "" {
 		return nil
 	}
@@ -200,60 +217,50 @@ func (j *juiceFS) Head(key string) (object.Object, error) {
 	return &jObj{key, fi}, nil
 }
 
-func (j *juiceFS) List(prefix, marker, delimiter string, limit int64) ([]object.Object, error) {
-	return nil, utils.ENOTSUP
-}
-
-// walk recursively descends path, calling w.
-func (j *juiceFS) walk(path string, info *fs.FileStat, isSymlink bool, walkFn WalkFunc) syscall.Errno {
-	err := walkFn(path, info, isSymlink, 0)
-	if err != 0 {
-		if info.IsDir() && err == skipDir {
-			return 0
+func (j *juiceFS) List(prefix, marker, token, delimiter string, limit int64, followLink bool) ([]object.Object, bool, string, error) {
+	if delimiter != "/" {
+		return nil, false, "", utils.ENOTSUP
+	}
+	dir := j.path(prefix)
+	var objs []object.Object
+	if !strings.HasSuffix(dir, dirSuffix) {
+		dir = path.Dir(dir)
+		if !strings.HasSuffix(dir, dirSuffix) {
+			dir += dirSuffix
 		}
-		return err
+	} else if marker == "" {
+		obj, err := j.Head(prefix)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, false, "", nil
+			}
+			return nil, false, "", err
+		}
+		objs = append(objs, obj)
 	}
-
-	if !info.IsDir() {
-		return 0
-	}
-
-	entries, err := j.readDirSorted(path)
+	entries, err := j.readDirSorted(dir, followLink)
 	if err != 0 {
-		return walkFn(path, info, isSymlink, err)
+		if err == syscall.ENOENT {
+			return nil, false, "", nil
+		}
+		return nil, false, "", err
 	}
-
 	for _, e := range entries {
-		p := path + e.name
-		err = j.walk(p, e.fi, e.isSymlink, walkFn)
-		if err != 0 && err != skipDir && err != syscall.ENOENT {
-			return err
+		key := dir[1:] + e.name
+		if !strings.HasPrefix(key, prefix) || (marker != "" && key <= marker) {
+			continue
+		}
+		f := &jObj{key, e.fi}
+		objs = append(objs, f)
+		if len(objs) == int(limit) {
+			break
 		}
 	}
-	return 0
-}
-
-func (j *juiceFS) walkRoot(root string, walkFn WalkFunc) syscall.Errno {
-	var err syscall.Errno
-	var lstat, info *fs.FileStat
-	lstat, err = j.jfs.Lstat(ctx, root)
-	if err != 0 {
-		err = walkFn(root, nil, false, err)
-	} else {
-		isSymlink := lstat.IsSymlink()
-		info, err = j.jfs.Stat(ctx, root)
-		if err != 0 {
-			// root is a broken link
-			err = walkFn(root, lstat, isSymlink, 0)
-		} else {
-			err = j.walk(root, info, isSymlink, walkFn)
-		}
+	var nextMarker string
+	if len(objs) > 0 {
+		nextMarker = objs[len(objs)-1].Key()
 	}
-
-	if err == skipDir {
-		return 0
-	}
-	return err
+	return objs, len(objs) == int(limit), nextMarker, nil
 }
 
 type mEntry struct {
@@ -264,7 +271,7 @@ type mEntry struct {
 
 // readDirSorted reads the directory named by dirname and returns
 // a sorted list of directory entries.
-func (j *juiceFS) readDirSorted(dirname string) ([]*mEntry, syscall.Errno) {
+func (j *juiceFS) readDirSorted(dirname string, followLink bool) ([]*mEntry, syscall.Errno) {
 	f, err := j.jfs.Open(ctx, dirname, 0)
 	if err != 0 {
 		return nil, err
@@ -279,9 +286,8 @@ func (j *juiceFS) readDirSorted(dirname string) ([]*mEntry, syscall.Errno) {
 		fi := fs.AttrToFileInfo(e.Inode, e.Attr)
 		if fi.IsDir() {
 			mEntries[i] = &mEntry{fi, string(e.Name) + dirSuffix, false}
-		} else if fi.IsSymlink() {
-			// follow symlink
-			fi2, err := j.jfs.Stat(ctx, filepath.Join(dirname, string(e.Name)))
+		} else if fi.IsSymlink() && followLink {
+			fi2, err := j.jfs.Stat(ctx, path.Join(dirname, string(e.Name)))
 			if err != 0 {
 				mEntries[i] = &mEntry{fi, string(e.Name), true}
 				continue
@@ -290,74 +296,38 @@ func (j *juiceFS) readDirSorted(dirname string) ([]*mEntry, syscall.Errno) {
 			if fi2.IsDir() {
 				name += dirSuffix
 			}
-			mEntries[i] = &mEntry{fi2, name, true}
+			mEntries[i] = &mEntry{fi2, name, false}
 		} else {
-			mEntries[i] = &mEntry{fi, string(e.Name), false}
+			mEntries[i] = &mEntry{fi, string(e.Name), fi.IsSymlink()}
 		}
 	}
 	sort.Slice(mEntries, func(i, j int) bool { return mEntries[i].name < mEntries[j].name })
 	return mEntries, err
 }
 
-type WalkFunc func(path string, info *fs.FileStat, isSymlink bool, err syscall.Errno) syscall.Errno
-
-func (d *juiceFS) ListAll(prefix, marker string) (<-chan object.Object, error) {
-	listed := make(chan object.Object, 10240)
-	var walkRoot string
-	if strings.HasSuffix(prefix, dirSuffix) {
-		walkRoot = prefix
-	} else {
-		// If the root is not ends with `/`, we'll list the directory root resides.
-		walkRoot = path.Dir(prefix) + dirSuffix
-	}
-	if walkRoot == "./" {
-		walkRoot = ""
-	}
-	go func() {
-		_ = d.walkRoot(dirSuffix+walkRoot, func(path string, info *fs.FileStat, isSymlink bool, err syscall.Errno) syscall.Errno {
-			if len(path) > 0 {
-				path = path[1:]
-			}
-			if err != 0 {
-				if err == syscall.ENOENT {
-					logger.Warnf("skip not exist file or directory: %s", path)
-					return 0
-				}
-				listed <- nil
-				logger.Errorf("list %s: %s", path, err)
-				return 0
-			}
-
-			if !strings.HasPrefix(path, prefix) {
-				if info.IsDir() && path != walkRoot {
-					return skipDir
-				}
-				return 0
-			}
-
-			key := path
-			if !strings.HasPrefix(key, prefix) || (marker != "" && key <= marker) {
-				if info.IsDir() && !strings.HasPrefix(prefix, key) && !strings.HasPrefix(marker, key) {
-					return skipDir
-				}
-				return 0
-			}
-			f := &jObj{key, info}
-			listed <- f
-			return 0
-		})
-		close(listed)
-	}()
-	return listed, nil
-}
-
 func (j *juiceFS) Chtimes(key string, mtime time.Time) error {
-	f, err := j.jfs.Open(ctx, j.path(key), 0)
+	f, err := j.jfs.Lopen(ctx, j.path(key), 0)
 	if err != 0 {
 		return err
 	}
 	defer f.Close(ctx)
 	return toError(f.Utime(ctx, -1, mtime.UnixNano()/1e6))
+}
+
+// syscallMode returns the syscall-specific mode bits from Go's portable mode bits.
+func syscallMode(i os.FileMode) (o uint32) {
+	o |= uint32(i.Perm())
+	if i&os.ModeSetuid != 0 {
+		o |= syscall.S_ISUID
+	}
+	if i&os.ModeSetgid != 0 {
+		o |= syscall.S_ISGID
+	}
+	if i&os.ModeSticky != 0 {
+		o |= syscall.S_ISVTX
+	}
+	// No mapping for Go's ModeTemporary (plan9 only).
+	return
 }
 
 func (j *juiceFS) Chmod(key string, mode os.FileMode) error {
@@ -366,13 +336,13 @@ func (j *juiceFS) Chmod(key string, mode os.FileMode) error {
 		return err
 	}
 	defer f.Close(ctx)
-	return toError(f.Chmod(ctx, uint16(mode.Perm())))
+	return toError(f.Chmod(ctx, uint16(syscallMode(mode))))
 }
 
 func (j *juiceFS) Chown(key string, owner, group string) error {
 	uid := utils.LookupUser(owner)
 	gid := utils.LookupGroup(group)
-	f, err := j.jfs.Open(ctx, j.path(key), 0)
+	f, err := j.jfs.Lopen(ctx, j.path(key), 0)
 	if err != 0 {
 		return err
 	}
@@ -380,12 +350,12 @@ func (j *juiceFS) Chown(key string, owner, group string) error {
 	return toError(f.Chown(ctx, uint32(uid), uint32(gid)))
 }
 
-func (d *juiceFS) Symlink(oldName, newName string) error {
-	p := d.path(newName)
-	err := d.jfs.Symlink(ctx, oldName, p)
+func (j *juiceFS) Symlink(oldName, newName string) error {
+	p := j.path(newName)
+	err := j.jfs.Symlink(ctx, oldName, p)
 	if err == syscall.ENOENT {
-		_ = d.jfs.MkdirAll(ctx, filepath.Dir(p), 0755)
-		err = d.jfs.Symlink(ctx, oldName, p)
+		_ = j.jfs.MkdirAll(ctx, path.Dir(p), 0777, j.umask)
+		err = j.jfs.Symlink(ctx, oldName, p)
 	}
 	return toError(err)
 }
@@ -410,6 +380,10 @@ func getDefaultChunkConf(format *meta.Format) *chunk.Config {
 	return chunkConf
 }
 
+func (j *juiceFS) Shutdown() {
+	_ = j.jfs.Meta().CloseSession()
+}
+
 func newJFS(endpoint, accessKey, secretKey, token string) (object.ObjectStorage, error) {
 	metaUrl := os.Getenv(endpoint)
 	if metaUrl == "" {
@@ -430,7 +404,7 @@ func newJFS(endpoint, accessKey, secretKey, token string) (object.ObjectStorage,
 	chunkConf := getDefaultChunkConf(format)
 	store := chunk.NewCachedStore(blob, *chunkConf, nil)
 	registerMetaMsg(metaCli, store, chunkConf)
-	err = metaCli.NewSession()
+	err = metaCli.NewSession(false)
 	if err != nil {
 		return nil, fmt.Errorf("new session: %s", err)
 	}
@@ -455,7 +429,7 @@ func newJFS(endpoint, accessKey, secretKey, token string) (object.ObjectStorage,
 	if err != nil {
 		return nil, fmt.Errorf("Initialize: %s", err)
 	}
-	return &juiceFS{object.DefaultObjectStorage{}, format.Name, jfs}, nil
+	return &juiceFS{object.DefaultObjectStorage{}, format.Name, uint16(utils.GetUmask()), jfs}, nil
 }
 
 func init() {

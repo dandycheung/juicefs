@@ -32,12 +32,15 @@ import (
 
 	"github.com/pkg/errors"
 
+	aws2 "github.com/aws/aws-sdk-go/aws"
 	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/ks3sdklib/aws-sdk-go/aws"
 	"github.com/ks3sdklib/aws-sdk-go/aws/awserr"
 	"github.com/ks3sdklib/aws-sdk-go/aws/credentials"
 	"github.com/ks3sdklib/aws-sdk-go/service/s3"
 )
+
+const s3StorageClassHdr = "X-Amz-Storage-Class"
 
 type ks3 struct {
 	bucket string
@@ -82,7 +85,7 @@ func (s *ks3) Head(key string) (Object, error) {
 	}
 
 	var sc string
-	if val, ok := r.Metadata["X-Amz-Storage-Class"]; ok {
+	if val, ok := r.Metadata[s3StorageClassHdr]; ok {
 		sc = *val
 	} else {
 		sc = "STANDARD"
@@ -96,7 +99,7 @@ func (s *ks3) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (s *ks3) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (s *ks3) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	params := &s3.GetObjectInput{Bucket: &s.bucket, Key: &key}
 	if off > 0 || limit > 0 {
 		var r string
@@ -108,13 +111,18 @@ func (s *ks3) Get(key string, off, limit int64) (io.ReadCloser, error) {
 		params.Range = &r
 	}
 	resp, err := s.s3.GetObject(params)
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(aws2.StringValue(resp.Metadata[s3RequestIDKey]))
+		attrs.SetStorageClass(aws2.StringValue(resp.Metadata[s3StorageClassHdr]))
+	}
 	if err != nil {
 		return nil, err
 	}
 	return resp.Body, nil
 }
 
-func (s *ks3) Put(key string, in io.Reader) error {
+func (s *ks3) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	var body io.ReadSeeker
 	if b, ok := in.(io.ReadSeeker); ok {
 		body = b
@@ -135,7 +143,11 @@ func (s *ks3) Put(key string, in io.Reader) error {
 	if s.sc != "" {
 		params.StorageClass = aws.String(s.sc)
 	}
-	_, err := s.s3.PutObject(params)
+	resp, err := s.s3.PutObject(params)
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(aws2.StringValue(resp.Metadata[s3RequestIDKey])).SetStorageClass(s.sc)
+	}
 	return err
 }
 func (s *ks3) Copy(dst, src string) error {
@@ -152,23 +164,27 @@ func (s *ks3) Copy(dst, src string) error {
 	return err
 }
 
-func (s *ks3) Delete(key string) error {
+func (s *ks3) Delete(key string, getters ...AttrGetter) error {
 	param := s3.DeleteObjectInput{
 		Bucket: &s.bucket,
 		Key:    &key,
 	}
-	_, err := s.s3.DeleteObject(&param)
+	resp, err := s.s3.DeleteObject(&param)
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(aws2.StringValue(resp.Metadata[s3RequestIDKey]))
+	}
 	if e, ok := err.(awserr.RequestFailure); ok && e.StatusCode() == http.StatusNotFound {
 		return nil
 	}
 	return err
 }
 
-func (s *ks3) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (s *ks3) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	param := s3.ListObjectsInput{
 		Bucket:       &s.bucket,
 		Prefix:       &prefix,
-		Marker:       &marker,
+		Marker:       &start,
 		MaxKeys:      &limit,
 		EncodingType: aws.String("url"),
 	}
@@ -177,7 +193,7 @@ func (s *ks3) List(prefix, marker, delimiter string, limit int64) ([]Object, err
 	}
 	resp, err := s.s3.ListObjects(&param)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(resp.Contents)
 	objs := make([]Object, n)
@@ -185,7 +201,7 @@ func (s *ks3) List(prefix, marker, delimiter string, limit int64) ([]Object, err
 		o := resp.Contents[i]
 		oKey, err := url.QueryUnescape(*o.Key)
 		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to decode key %s", *o.Key)
+			return nil, false, "", errors.WithMessagef(err, "failed to decode key %s", *o.Key)
 		}
 		objs[i] = &obj{oKey, *o.Size, *o.LastModified, strings.HasSuffix(oKey, "/"), *o.StorageClass}
 	}
@@ -193,16 +209,20 @@ func (s *ks3) List(prefix, marker, delimiter string, limit int64) ([]Object, err
 		for _, p := range resp.CommonPrefixes {
 			prefix, err := url.QueryUnescape(*p.Prefix)
 			if err != nil {
-				return nil, errors.WithMessagef(err, "failed to decode commonPrefixes %s", *p.Prefix)
+				return nil, false, "", errors.WithMessagef(err, "failed to decode commonPrefixes %s", *p.Prefix)
 			}
 			objs = append(objs, &obj{prefix, 0, time.Unix(0, 0), true, ""})
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	var nextMarker string
+	if resp.NextMarker != nil {
+		nextMarker = *resp.NextMarker
+	}
+	return objs, *resp.IsTruncated, nextMarker, nil
 }
 
-func (s *ks3) ListAll(prefix, marker string) (<-chan Object, error) {
+func (s *ks3) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	return nil, notSupported
 }
 
@@ -299,8 +319,9 @@ func (s *ks3) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, nextMarker, nil
 }
 
-func (s *ks3) SetStorageClass(sc string) {
+func (s *ks3) SetStorageClass(sc string) error {
 	s.sc = sc
+	return nil
 }
 
 var ks3Regions = map[string]string{
@@ -323,10 +344,13 @@ func newKS3(endpoint, accessKey, secretKey, token string) (ObjectStorage, error)
 	uri, _ := url.ParseRequestURI(endpoint)
 	ssl := strings.ToLower(uri.Scheme) == "https"
 	hostParts := strings.Split(uri.Host, ".")
+	if len(hostParts) < 2 {
+		return nil, fmt.Errorf("invalid endpoint: %s", endpoint)
+	}
 	bucket := hostParts[0]
 	region := hostParts[1][3:]
 	region = strings.TrimLeft(region, "-")
-	var pathStyle bool = true
+	var pathStyle bool = defaultPathStyle()
 	if strings.HasSuffix(uri.Host, "ksyun.com") || strings.HasSuffix(uri.Host, "ksyuncs.com") {
 		region = strings.TrimSuffix(region, "-internal")
 		region = ks3Regions[region]

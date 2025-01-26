@@ -46,7 +46,7 @@ func (c *etcdClient) String() string {
 	return fmt.Sprintf("etcd://%s/", c.addr)
 }
 
-func (c *etcdClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (c *etcdClient) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	resp, err := c.kv.Get(context.TODO(), key, etcd.WithLimit(1))
 	if err != nil {
 		return nil, err
@@ -66,7 +66,7 @@ func (c *etcdClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return nil, os.ErrNotExist
 }
 
-func (c *etcdClient) Put(key string, in io.Reader) error {
+func (c *etcdClient) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	d, err := io.ReadAll(in)
 	if err != nil {
 		return err
@@ -94,7 +94,7 @@ func (c *etcdClient) Head(key string) (Object, error) {
 	return nil, os.ErrNotExist
 }
 
-func (c *etcdClient) Delete(key string) error {
+func (c *etcdClient) Delete(key string, getters ...AttrGetter) error {
 	_, err := c.kv.Delete(context.TODO(), key)
 	return err
 }
@@ -111,12 +111,12 @@ func genNextKey(key string) string {
 	return string(next)
 }
 
-func (c *etcdClient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (c *etcdClient) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if delimiter != "" {
-		return nil, notSupportedDelimiter
+		return nil, false, "", notSupported
 	}
-	if marker == "" {
-		marker = prefix
+	if start == "" {
+		start = prefix
 	}
 	var opts = []etcd.OpOption{etcd.WithLimit(limit), etcd.WithSort(etcd.SortByKey, etcd.SortAscend)}
 	if len(prefix) > 0 && prefix[0] != 0xFF {
@@ -124,9 +124,9 @@ func (c *etcdClient) List(prefix, marker, delimiter string, limit int64) ([]Obje
 	} else {
 		opts = append(opts, etcd.WithFromKey())
 	}
-	resp, err := c.client.Get(context.Background(), marker, opts...)
+	resp, err := c.client.Get(context.Background(), start, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("get start %v: %s", marker, err)
+		return nil, false, "", fmt.Errorf("get start %v: %s", start, err)
 	}
 	var objs []Object
 	for _, kv := range resp.Kvs {
@@ -142,7 +142,11 @@ func (c *etcdClient) List(prefix, marker, delimiter string, limit int64) ([]Obje
 			"",
 		})
 	}
-	return objs, nil
+	var nextMarker string
+	if resp.More && len(objs) > 0 {
+		nextMarker = objs[len(objs)-1].Key()
+	}
+	return objs, resp.More, nextMarker, nil
 }
 
 func buildTlsConfig(u *url.URL) (*tls.Config, error) {

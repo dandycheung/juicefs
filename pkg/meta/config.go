@@ -28,27 +28,32 @@ import (
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/version"
+	"github.com/pkg/errors"
 )
 
 // Config for clients.
 type Config struct {
-	Strict         bool // update ctime
-	Retries        int
-	MaxDeletes     int
-	SkipDirNlink   int
-	CaseInsensi    bool
-	ReadOnly       bool
-	NoBGJob        bool // disable background jobs like clean-up, backup, etc.
-	OpenCache      time.Duration
-	OpenCacheLimit uint64 // max number of files to cache (soft limit)
-	Heartbeat      time.Duration
-	MountPoint     string
-	Subdir         string
-	AtimeMode      string
+	Strict             bool // update ctime
+	Retries            int
+	MaxDeletes         int
+	SkipDirNlink       int
+	CaseInsensi        bool
+	ReadOnly           bool
+	NoBGJob            bool // disable background jobs like clean-up, backup, etc.
+	OpenCache          time.Duration
+	OpenCacheLimit     uint64 // max number of files to cache (soft limit)
+	Heartbeat          time.Duration
+	MountPoint         string
+	Subdir             string
+	AtimeMode          string
+	DirStatFlushPeriod time.Duration
+	SkipDirMtime       time.Duration
+	Sid                uint64
+	SortDir            bool
 }
 
 func DefaultConf() *Config {
-	return &Config{Strict: true, Retries: 10, MaxDeletes: 2, Heartbeat: 12 * time.Second}
+	return &Config{Strict: true, Retries: 10, MaxDeletes: 2, Heartbeat: 12 * time.Second, AtimeMode: NoAtime, DirStatFlushPeriod: 1 * time.Second}
 }
 
 func (c *Config) SelfCheck() {
@@ -60,7 +65,7 @@ func (c *Config) SelfCheck() {
 		c.Heartbeat = time.Second
 	}
 	if c.Heartbeat > time.Minute*10 {
-		logger.Warnf("heartbeat shouldd not be greater than 10 minutes")
+		logger.Warnf("heartbeat should not be greater than 10 minutes")
 		c.Heartbeat = time.Minute * 10
 	}
 }
@@ -89,6 +94,8 @@ type Format struct {
 	MetaVersion      int    `json:",omitempty"`
 	MinClientVersion string `json:",omitempty"`
 	MaxClientVersion string `json:",omitempty"`
+	DirStats         bool   `json:",omitempty"`
+	EnableACL        bool
 }
 
 func (f *Format) update(old *Format, force bool) error {
@@ -99,8 +106,6 @@ func (f *Format) update(old *Format, force bool) error {
 		switch {
 		case f.Name != old.Name:
 			args = []interface{}{"name", old.Name, f.Name}
-		case f.Storage != old.Storage:
-			args = []interface{}{"storage", old.Storage, f.Storage}
 		case f.BlockSize != old.BlockSize:
 			args = []interface{}{"block size", old.BlockSize, f.BlockSize}
 		case f.Compression != old.Compression:
@@ -145,8 +150,18 @@ func (f *Format) CheckVersion() error {
 		return fmt.Errorf("incompatible metadata version: %d; please upgrade the client", f.MetaVersion)
 	}
 
+	ver := version.GetVersion()
+	return f.CheckCliVersion(&ver)
+}
+
+func (f *Format) CheckCliVersion(ver *version.Semver) error {
+	if ver == nil {
+		return errors.New("version is nil")
+	}
+
 	if f.MinClientVersion != "" {
-		r, err := version.Compare(f.MinClientVersion)
+		minClientVer := version.Parse(f.MinClientVersion)
+		r, err := version.CompareVersions(ver, minClientVer)
 		if err == nil && r < 0 {
 			err = fmt.Errorf("allowed minimum version: %s; please upgrade the client", f.MinClientVersion)
 		}
@@ -155,7 +170,8 @@ func (f *Format) CheckVersion() error {
 		}
 	}
 	if f.MaxClientVersion != "" {
-		r, err := version.Compare(f.MaxClientVersion)
+		maxClientVer := version.Parse(f.MaxClientVersion)
+		r, err := version.CompareVersions(ver, maxClientVer)
 		if err == nil && r > 0 {
 			err = fmt.Errorf("allowed maximum version: %s; please use an older client", f.MaxClientVersion)
 		}

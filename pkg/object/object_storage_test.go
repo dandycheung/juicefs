@@ -24,6 +24,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/baidubce/bce-sdk-go/services/bos/api"
+	"github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
 	"io"
 	"math"
 	"os"
@@ -35,19 +37,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colinmarc/hdfs/v2/hadoopconf"
+	"github.com/juicedata/juicefs/pkg/utils"
+
 	blob2 "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 
 	"github.com/volcengine/ve-tos-golang-sdk/v2/tos/enum"
-
-	"github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 
 	"github.com/redis/go-redis/v9"
 )
 
-func get(s ObjectStorage, k string, off, limit int64) (string, error) {
-	r, err := s.Get(k, off, limit)
+func get(s ObjectStorage, k string, off, limit int64, getters ...AttrGetter) (string, error) {
+	r, err := s.Get(k, off, limit, getters...)
 	if err != nil {
 		return "", err
 	}
@@ -58,12 +61,8 @@ func get(s ObjectStorage, k string, off, limit int64) (string, error) {
 	return string(data), nil
 }
 
-func listAll(s ObjectStorage, prefix, marker string, limit int64) ([]Object, error) {
-	r, err := s.List(prefix, marker, "", limit)
-	if !errors.Is(err, notSupported) {
-		return r, err
-	}
-	ch, err := s.ListAll(prefix, marker)
+func listAll(s ObjectStorage, prefix, marker string, limit int64, followLink bool) ([]Object, error) {
+	ch, err := ListAll(s, prefix, marker, followLink)
 	if err == nil {
 		objs := make([]Object, 0)
 		for obj := range ch {
@@ -77,40 +76,33 @@ func listAll(s ObjectStorage, prefix, marker string, limit int64) ([]Object, err
 }
 
 func setStorageClass(o ObjectStorage) string {
-	switch s := o.(type) {
-	case *wasb:
-		s.sc = string(blob2.AccessTierCool)
-		return s.sc
-	case *bosclient:
-		s.sc = "STANDARD_IA"
-		return s.sc
-	case *COS:
-		s.sc = "STANDARD_IA"
-		return s.sc
-	case *ks3:
-		s.sc = "STANDARD_IA"
-		return s.sc
-	case *gs:
-		s.sc = "NEARLINE"
-		return s.sc
-	case *obsClient:
-		s.sc = string(obs.StorageClassWarm)
-		return s.sc
-	case *ossClient:
-		s.sc = string(oss.StorageIA)
-		return s.sc
-	case *qingstor:
-		s.sc = "STANDARD_IA"
-		return s.sc
-	case *s3client:
-		s.sc = "STANDARD_IA"
-		return s.sc
-	case *tosClient:
-		s.sc = string(enum.StorageClassIa)
-		return s.sc
-	default:
-		return ""
+	if osc, ok := o.(SupportStorageClass); ok {
+		var sc = "STANDARD_IA"
+		switch o.(type) {
+		case *wasb:
+			sc = string(blob2.AccessTierCool)
+		case *gs:
+			sc = "NEARLINE"
+		case *ossClient:
+			sc = string(oss.StorageIA)
+		case *tosClient:
+			sc = string(enum.StorageClassIa)
+		case *obsClient:
+			sc = string(obs.StorageClassStandard)
+		case *bosclient:
+			sc = api.STORAGE_CLASS_STANDARD
+		case *minio:
+			sc = "REDUCED_REDUNDANCY"
+		case *scw:
+			sc = "ONEZONE_IA" // STANDARD, ONEZONE_IA, GLACIER
+		}
+		err := osc.SetStorageClass(sc)
+		if err != nil {
+			sc = ""
+		}
+		return sc
 	}
+	return ""
 }
 
 // nolint:errcheck
@@ -130,11 +122,15 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		}
 	}()
 
-	key := "测试编码文件" + `{"name":"zhijian"}` + string('\u001F')
-	if err := s.Put(key, bytes.NewReader(nil)); err != nil {
+	var scPut string
+	key := "测试编码文件" + `{"name":"juicefs"}` + string('\u001F') + "%uFF081%uFF09.jpg"
+	if err := s.Put(key, bytes.NewReader(nil), WithStorageClass(&scPut)); err != nil {
 		t.Logf("PUT testEncodeFile failed: %s", err.Error())
 	} else {
-		if resp, err := s.List("", "测试编码文件", "", 1); err != nil && err != notSupported {
+		if scPut != sc {
+			t.Fatalf("Storage class should be %q, got %q", sc, scPut)
+		}
+		if resp, _, _, err := s.List("测试编码文件", "", "", "", 1, true); err != nil && err != notSupported {
 			t.Logf("List testEncodeFile Failed: %s", err)
 		} else if len(resp) == 1 && resp[0].Key() != key {
 			t.Logf("List testEncodeFile Failed: expect key %s, but got %s", key, resp[0].Key())
@@ -152,10 +148,15 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		t.Fatalf("PUT failed: %s", err.Error())
 	}
 
+	var scGet string
 	// get all
-	if d, e := get(s, "test", 0, -1); e != nil || d != "hello" {
+	if d, e := get(s, "test", 0, -1, WithStorageClass(&scGet)); e != nil || d != "hello" {
 		t.Fatalf("expect hello, but got %v, error: %s", d, e)
 	}
+	if scGet != sc { // Relax me when testing against a storage that doesn't use specified storage class
+		t.Fatalf("Storage class should be %q, got %q", sc, scGet)
+	}
+
 	if d, e := get(s, "test", 0, 5); e != nil || d != "hello" {
 		t.Fatalf("expect hello, but got %v, error: %s", d, e)
 	}
@@ -185,7 +186,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	}
 	switch s.(*withPrefix).os.(type) {
 	case FileSystem:
-		objs, err2 := listAll(s, "", "", 2)
+		objs, err2 := listAll(s, "", "", 2, true)
 		if err2 == nil {
 			if len(objs) != 2 {
 				t.Fatalf("List should return 2 keys, but got %d", len(objs))
@@ -197,7 +198,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 				t.Fatalf("First object size should be 0, but got %d", objs[0].Size())
 			}
 			if objs[1].Key() != "test" {
-				t.Fatalf("First key should be test, but got %s", objs[1].Key())
+				t.Fatalf("Second key should be test, but got %s", objs[1].Key())
 			}
 			if !strings.Contains(s.String(), "encrypted") && objs[1].Size() != 5 {
 				t.Fatalf("Size of first key shold be 5, but got %v", objs[1].Size())
@@ -210,14 +211,14 @@ func testStorage(t *testing.T, s ObjectStorage) {
 			t.Fatalf("list failed: %s", err2.Error())
 		}
 
-		objs, err2 = listAll(s, "", "test2", 1)
+		objs, err2 = listAll(s, "", "test2", 1, true)
 		if err2 != nil {
 			t.Fatalf("list3 failed: %s", err2.Error())
 		} else if len(objs) != 0 {
 			t.Fatalf("list3 should not return anything, but got %d", len(objs))
 		}
 	default:
-		objs, err2 := listAll(s, "", "", 1)
+		objs, err2 := listAll(s, "", "", 1, true)
 		if err2 == nil {
 			if len(objs) != 1 {
 				t.Fatalf("List should return 1 keys, but got %d", len(objs))
@@ -236,7 +237,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 			t.Fatalf("list failed: %s", err2.Error())
 		}
 
-		objs, err2 = listAll(s, "", "test2", 1)
+		objs, err2 = listAll(s, "", "test2", 1, true)
 		if err2 != nil {
 			t.Fatalf("list3 failed: %s", err2.Error())
 		} else if len(objs) != 0 {
@@ -244,6 +245,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		}
 	}
 
+	defer s.Delete("a/")
 	defer s.Delete("a/a")
 	if err := s.Put("a/a", bytes.NewReader(br)); err != nil {
 		t.Fatalf("PUT failed: %s", err.Error())
@@ -252,6 +254,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	if err := s.Put("a/a1", bytes.NewReader(br)); err != nil {
 		t.Fatalf("PUT failed: %s", err.Error())
 	}
+	defer s.Delete("b/")
 	defer s.Delete("b/b")
 	if err := s.Put("b/b", bytes.NewReader(br)); err != nil {
 		t.Fatalf("PUT failed: %s", err.Error())
@@ -281,13 +284,65 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	if err := s.Put("a1", bytes.NewReader(br)); err != nil {
 		t.Fatalf("PUT failed: %s", err.Error())
 	}
-	if obs, err := s.List("", "", "/", 10); err != nil {
-		if !(errors.Is(err, notSupportedDelimiter) || errors.Is(err, notSupported)) {
-			t.Fatalf("list with delimiter: %s", err)
+
+	if obs, more, nextMarker, err := s.List("", "", "", "/", 4, true); err != nil {
+		if !errors.Is(err, notSupported) {
+			t.Fatalf("list: %s", err)
 		} else {
-			t.Logf("list api error: %s", err)
+			t.Logf("list is not supported")
 		}
 	} else {
+		if _, ok := s.(*withPrefix).os.(FileSystem); !ok {
+			keys := []string{"a/", "a1", "b/", "c/"}
+			if len(obs) != 4 {
+				t.Fatalf("list should return 4 results but got %d", len(obs))
+			}
+			for i, o := range obs {
+				if o.Key() != keys[i] {
+					t.Fatalf("should get key %s but got %s", keys[i], o.Key())
+				}
+			}
+			if !more {
+				t.Fatalf("should have more results")
+			}
+			if nextMarker == "" {
+				t.Fatalf("next marker should not be empty")
+			}
+			obs, more, nextMarker, err = s.List("", obs[len(obs)-1].Key(), nextMarker, "/", 4, true)
+			if err != nil {
+				t.Fatalf("list with marker: %s", err)
+			}
+			if len(obs) != 1 {
+				t.Fatalf("list should return 1 results but got %d", len(obs))
+			}
+			if obs[0].Key() != "test" {
+				t.Fatalf("should get key test but got %s", obs[0].Key())
+			}
+			_, more, nextMarker, err = s.List("", obs[len(obs)-1].Key(), nextMarker, "/", 4, true)
+			if more {
+				t.Fatalf("should no more results")
+			}
+			if nextMarker != "" {
+				t.Fatalf("next marker should not be empty")
+			}
+		}
+	}
+
+	if obs, _, _, err := s.List("", "", "", "/", 10, true); err != nil {
+		if !errors.Is(err, notSupported) {
+			t.Fatalf("list with delimiter: %s", err)
+		} else {
+			t.Logf("list with delimiter is not supported")
+		}
+	} else {
+		switch s.(*withPrefix).os.(type) {
+		case FileSystem:
+			if len(obs) == 0 || obs[0].Key() != "" {
+				t.Fatalf("list should return itself")
+			} else {
+				obs = obs[1:] // ignore itself
+			}
+		}
 		if len(obs) != 5 {
 			t.Fatalf("list with delimiter should return five results but got %d", len(obs))
 		}
@@ -299,13 +354,37 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		}
 	}
 
-	if obs, err := s.List("a/", "", "/", 10); err != nil {
-		if !(errors.Is(err, notSupportedDelimiter) || errors.Is(err, notSupported)) {
+	if obs, _, _, err := s.List("a", "", "", "/", 10, true); err != nil {
+		if !errors.Is(err, notSupported) {
 			t.Fatalf("list with delimiter: %s", err)
-		} else {
-			t.Logf("list api error: %s", err)
 		}
 	} else {
+		if len(obs) != 2 {
+			t.Fatalf("list with delimiter should return two results but got %d", len(obs))
+		}
+		keys := []string{"a/", "a1"}
+		for i, o := range obs {
+			if o.Key() != keys[i] {
+				t.Fatalf("should get key %s but got %s", keys[i], o.Key())
+			}
+		}
+	}
+
+	if obs, _, _, err := s.List("a/", "", "", "/", 10, true); err != nil {
+		if !errors.Is(err, notSupported) {
+			t.Fatalf("list with delimiter: %s", err)
+		} else {
+			t.Logf("list with delimiter is not supported")
+		}
+	} else {
+		switch s.(*withPrefix).os.(type) {
+		case FileSystem:
+			if len(obs) == 0 || obs[0].Key() != "a/" {
+				t.Fatalf("list should return itself")
+			} else {
+				obs = obs[1:] // ignore itself
+			}
+		}
 		if len(obs) != 3 {
 			t.Fatalf("list with delimiter should return three results but got %d", len(obs))
 		}
@@ -333,7 +412,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 			_ = s.Delete(fmt.Sprintf("hashKey%d", i))
 		}
 	}()
-	objs, err := listAll(s, "hashKey", "", int64(keyTotal))
+	objs, err := listAll(s, "hashKey", "", int64(keyTotal), true)
 	if err != nil {
 		t.Fatalf("list4 failed: %s", err.Error())
 	} else {
@@ -415,7 +494,7 @@ func testStorage(t *testing.T, s ObjectStorage) {
 	if upload, err := s.CreateMultipartUpload(k); err == nil {
 		total := 3
 		seed := make([]byte, upload.MinPartSize)
-		rand.Read(seed)
+		utils.RandRead(seed)
 		parts := make([]*Part, total)
 		content := make([][]byte, total)
 		for i := 0; i < total; i++ {
@@ -441,17 +520,27 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		wg.Wait()
 		// overwrite the first part
 		firstPartContent := append(getMockData(seed, 0), getMockData(seed, 0)...)
-		if parts[0], err = s.UploadPart(k, upload.UploadID, 1, firstPartContent); err != nil {
-			t.Fatalf("multipart upload error: %v", err)
+		if len(firstPartContent) < int(s.Limits().MaxPartSize) {
+			firstPartContent = getMockData(seed, 0)
+			firstPartContent[0] = 'a'
 		}
-		content[0] = firstPartContent
+		oldPart := parts[0]
+		if parts[0], err = s.UploadPart(k, upload.UploadID, 1, firstPartContent); err != nil {
+			t.Logf("overwrite the first part error: %v", err)
+			parts[0] = oldPart
+		} else {
+			content[0] = firstPartContent
+		}
 
 		// overwrite the last part
 		lastPartContent := []byte("hello")
+		oldPart = parts[total-1]
 		if parts[total-1], err = s.UploadPart(k, upload.UploadID, total, lastPartContent); err != nil {
-			t.Fatalf("multipart upload error: %v", err)
+			t.Logf("overwrite the last part error: %v", err)
+			parts[total-1] = oldPart
+		} else {
+			content[total-1] = lastPartContent
 		}
-		content[total-1] = lastPartContent
 
 		if err = s.CompleteUpload(k, upload.UploadID, parts); err != nil {
 			t.Fatalf("failed to complete multipart upload: %v", err)
@@ -476,25 +565,27 @@ func testStorage(t *testing.T, s ObjectStorage) {
 		}
 		checkContent(k, bytes.Join(content, nil))
 
-		var copyUpload *MultipartUpload
-		var dstKey = "dstUploadPartCopyKey"
-		defer s.Delete(dstKey)
-		if copyUpload, err = s.CreateMultipartUpload(dstKey); err != nil {
-			t.Fatalf("failed to create multipart upload: %v", err)
-		}
-		copyParts := make([]*Part, total)
-		var startIdx = 0
-		for i, c := range content {
-			copyParts[i], err = s.UploadPartCopy(dstKey, copyUpload.UploadID, i+1, k, int64(startIdx), int64(len(c)))
-			if err != nil {
-				t.Fatalf("failed to upload part copy: %v", err)
+		if s.Limits().IsSupportUploadPartCopy {
+			var copyUpload *MultipartUpload
+			var dstKey = "dstUploadPartCopyKey"
+			defer s.Delete(dstKey)
+			if copyUpload, err = s.CreateMultipartUpload(dstKey); err != nil {
+				t.Fatalf("failed to create multipart upload: %v", err)
 			}
-			startIdx += len(c)
+			copyParts := make([]*Part, total)
+			var startIdx = 0
+			for i, c := range content {
+				copyParts[i], err = s.UploadPartCopy(dstKey, copyUpload.UploadID, i+1, k, int64(startIdx), int64(len(c)))
+				if err != nil {
+					t.Fatalf("failed to upload part copy: %v", err)
+				}
+				startIdx += len(c)
+			}
+			if err = s.CompleteUpload(dstKey, copyUpload.UploadID, copyParts); err != nil {
+				t.Fatalf("failed to complete multipart upload: %v", err)
+			}
+			checkContent(dstKey, bytes.Join(content, nil))
 		}
-		if err = s.CompleteUpload(dstKey, copyUpload.UploadID, copyParts); err != nil {
-			t.Fatalf("failed to complete multipart upload: %v", err)
-		}
-		checkContent(dstKey, bytes.Join(content, nil))
 	} else {
 		t.Logf("%s does not support multipart upload: %s", s, err.Error())
 	}
@@ -616,7 +707,6 @@ func TestGS(t *testing.T) { //skip mutate
 	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
 		t.SkipNow()
 	}
-	//export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
 	gs, _ := newGS(os.Getenv("GOOGLE_ENDPOINT"), "", "", "")
 	testStorage(t, gs)
 }
@@ -671,15 +761,6 @@ func TestJSS(t *testing.T) { //skip mutate
 	testStorage(t, jss)
 }
 
-func TestSpeedy(t *testing.T) { //skip mutate
-	if os.Getenv("SPEEDY_ACCESS_KEY") == "" {
-		t.SkipNow()
-	}
-	cos, _ := newSpeedy(os.Getenv("SPEEDY_ENDPOINT"),
-		os.Getenv("SPEEDY_ACCESS_KEY"), os.Getenv("SPEEDY_SECRET_KEY"), "")
-	testStorage(t, cos)
-}
-
 func TestB2(t *testing.T) { //skip mutate
 	if os.Getenv("B2_ACCOUNT_ID") == "" {
 		t.SkipNow()
@@ -725,7 +806,45 @@ func TestOBS(t *testing.T) { //skip mutate
 	testStorage(t, b)
 }
 
+func TestNFS(t *testing.T) { //skip mutate
+	if os.Getenv("NFS_ADDR") == "" {
+		t.SkipNow()
+	}
+	b, err := newNFSStore(os.Getenv("NFS_ADDR"), os.Getenv("NFS_ACCESS_KEY"), os.Getenv("NFS_SECRET_KEY"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testStorage(t, b)
+}
+
 func TestHDFS(t *testing.T) { //skip mutate
+	conf := make(hadoopconf.HadoopConf)
+	conf["dfs.namenode.rpc-address.ns.namenode1"] = "hadoop01:8020"
+	conf["dfs.namenode.rpc-address.ns.namenode2"] = "hadoop02:8020"
+
+	checkAddr := func(addr string, expected []string, base string) {
+		addresses, basePath := parseHDFSAddr(addr, conf)
+		sort.Strings(addresses)
+		if !reflect.DeepEqual(addresses, expected) {
+			t.Fatalf("expected addrs is %+v but got %+v from %s", expected, addresses, addr)
+		}
+		if basePath != base {
+			t.Fatalf("expected path is %s but got %s from %s", base, basePath, addr)
+		}
+	}
+
+	checkAddr("hadoop01:8020", []string{"hadoop01:8020"}, "/")
+	checkAddr("hdfs://hadoop01:8020/", []string{"hadoop01:8020"}, "/")
+	checkAddr("hadoop01:8020/user/juicefs/", []string{"hadoop01:8020"}, "/user/juicefs/")
+	checkAddr("hadoop01:8020/user/juicefs", []string{"hadoop01:8020"}, "/user/juicefs/")
+	checkAddr("hdfs://hadoop01:8020/user/juicefs/", []string{"hadoop01:8020"}, "/user/juicefs/")
+
+	// for HA
+	checkAddr("hadoop01:8020,hadoop02:8020", []string{"hadoop01:8020", "hadoop02:8020"}, "/")
+	checkAddr("hadoop01:8020,hadoop02:8020/user/juicefs/", []string{"hadoop01:8020", "hadoop02:8020"}, "/user/juicefs/")
+	checkAddr("hdfs://ns/user/juicefs", []string{"hadoop01:8020", "hadoop02:8020"}, "/user/juicefs/")
+	checkAddr("ns/user/juicefs/", []string{"hadoop01:8020", "hadoop02:8020"}, "/user/juicefs/")
+
 	if os.Getenv("HDFS_ADDR") == "" {
 		t.SkipNow()
 	}
@@ -875,7 +994,7 @@ func TestPG(t *testing.T) { //skip mutate
 
 }
 func TestPGWithSearchPath(t *testing.T) { //skip mutate
-	_, err := newSQLStore("postgres", "localhost:5432/test?sslmode=disable&search_path=juicefs,public", "", "")
+	_, err := newSQLStore("postgres", "127.0.0.1:5432/test?sslmode=disable&search_path=juicefs,public", "", "")
 	if !strings.Contains(err.Error(), "currently, only one schema is supported in search_path") {
 		t.Fatalf("TestPGWithSearchPath error: %s", err)
 	}
@@ -959,6 +1078,28 @@ func TestTOS(t *testing.T) { //skip mutate
 	}
 	testStorage(t, tos)
 }
+
+func TestDragonfly(t *testing.T) { //skip mutate
+	if os.Getenv("DRAGONFLY_ENDPOINT") == "" {
+		t.SkipNow()
+	}
+	dragonfly, err := newDragonfly(os.Getenv("DRAGONFLY_ENDPOINT"), "", "", "")
+	if err != nil {
+		t.Fatalf("create: %s", err)
+	}
+	testStorage(t, dragonfly)
+}
+
+// func TestBunny(t *testing.T) { //skip mutate
+// 	if os.Getenv("BUNNY_ENDPOINT") == "" {
+// 		t.SkipNow()
+// 	}
+// 	bunny, err := newBunny(os.Getenv("BUNNY_ENDPOINT"), "", os.Getenv("BUNNY_SECRET_KEY"), "")
+// 	if err != nil {
+// 		t.Fatalf("create: %s", err)
+// 	}
+// 	testStorage(t, bunny)
+// }
 
 func TestMain(m *testing.M) {
 	if envFile := os.Getenv("JUICEFS_ENV_FILE_FOR_TEST"); envFile != "" {

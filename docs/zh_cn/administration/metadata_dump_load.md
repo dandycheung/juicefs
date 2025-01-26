@@ -6,12 +6,11 @@ slug: /metadata_dump_load
 
 :::tip 提示
 
-- JuiceFS v0.15.2 开始支持元数据手动备份、恢复和引擎间迁移。
 - JuiceFS v1.0.0 开始支持元数据自动备份
 - JuiceFS v1.0.4 开始支持通过 `load` 命令恢复加密的元数据备份
 :::
 
-JuiceFS 支持[多种元数据引擎](../guide/how_to_set_up_metadata_engine.md)，且各引擎内部的数据管理格式各有不同。为了便于管理，JuiceFS 提供了 [`dump`](../reference/command_reference.md#dump) 命令允许将所有元数据以统一格式写入到 JSON 文件进行备份。同时，JuiceFS 也提供了 [`load`](../reference/command_reference.md#load) 命令，允许将备份恢复或迁移到任意元数据存储引擎。
+JuiceFS 支持[多种元数据引擎](../reference/how_to_set_up_metadata_engine.md)，且各引擎内部的数据管理格式各有不同。为了便于管理，JuiceFS 提供了 [`dump`](../reference/command_reference.mdx#dump) 命令允许将所有元数据以统一格式写入到 JSON 文件进行备份。同时，JuiceFS 也提供了 [`load`](../reference/command_reference.mdx#load) 命令，允许将备份恢复或迁移到任意元数据存储引擎。这个导出导入流程也可以用来将 JuiceFS 社区版文件系统迁移到企业版（参考[企业版文档](https://juicefs.com/docs/zh/cloud/administration/metadata_dump_load)），反之亦然。
 
 ## 元数据备份 {#backup}
 
@@ -43,7 +42,7 @@ juicefs dump redis://192.168.1.6:6379/1 meta-dump.json
 
 备份的文件存储在对象存储的 `meta` 目录中，它是一个独立于数据存储的目录，在挂载点中不可见，也不会与数据存储之间产生影响，用对象存储的文件浏览器即可查看和管理。
 
-![](../images/meta-auto-backup-list.png)
+![meta-auto-backup-list](../images/meta-auto-backup-list.png)
 
 默认情况下，JuiceFS 客户端每小时备份一次元数据，自动备份的频率可以在挂载文件系统时通过 `--backup-meta` 选项进行调整，例如，要设置为每 8 个小时执行一次自动备份：
 
@@ -60,6 +59,10 @@ juicefs mount -d --backup-meta 8h redis://127.0.0.1:6379/1 /mnt
 值得一提的是，备份操作耗时会随着文件系统内文件数的增多而增加，因此当文件数较多（默认为达到一百万）且自动备份频率为默认值 1 小时的情况下 JuiceFS 会自动跳过元数据备份，并打印相应的告警日志。此时可以选择挂载一个新客户端并设置较大的 `--backup-meta` 参数来重新启用自动备份。
 
 作为参考，当使用 Redis 作为元数据引擎时，备份一百万文件的元数据大约需要 1 分钟，消耗约 1GB 内存。
+
+:::caution 注意
+使用 `--read-only` 只读挂载时，元数据不会自动备份。
+:::
 
 #### 自动备份策略
 
@@ -78,7 +81,7 @@ JuiceFS 会按照以下规则定期清理备份：
 
 ## 元数据恢复与迁移 {#recovery-and-migration}
 
-使用 [`load`](../reference/command_reference.md#load) 命令可以将 `dump` 命令导出的元数据恢复到一个空数据库中，比如：
+使用 [`load`](../reference/command_reference.mdx#load) 命令可以将 `dump` 命令导出的元数据恢复到一个空数据库中，比如：
 
 ```shell
 juicefs load redis://192.168.1.6:6379/1 meta-dump.json
@@ -108,7 +111,7 @@ juicefs load redis://192.168.1.6:6379/1 meta-dump.json
 juicefs dump redis://192.168.1.6:6379/1 | juicefs load mysql://user:password@(192.168.1.6:3306)/juicefs
 ```
 
-需要注意的是，由于 `dump` 导出的备份中默认排除了对象存储的 API 访问密钥，不论恢复还是迁移元数据，完成操作后都需要使用 [`juicefs config`](../reference/command_reference.md#config) 命令把文件系统关联的对象存储的认证信息再添加回去，例如：
+需要注意的是，由于 `dump` 导出的备份中默认排除了对象存储的 API 访问密钥，不论恢复还是迁移元数据，完成操作后都需要使用 [`juicefs config`](../reference/command_reference.mdx#config) 命令把文件系统关联的对象存储的认证信息再添加回去，例如：
 
 ```shell
 juicefs config --secret-key xxxxx mysql://user:password@(192.168.1.6:3306)/juicefs
@@ -116,7 +119,7 @@ juicefs config --secret-key xxxxx mysql://user:password@(192.168.1.6:3306)/juice
 
 ### 加密文件系统 {#encrypted-file-system}
 
-对于[加密的文件系统](../security/encrypt.md)，所有文件都会在本地加密后才上传到后端对象存储，包括元数据自动备份文件，也会加密后才上传至对象存储。这与 `dump` 命令不同，`dump` 导出的元数据永远是明文的。
+对于[加密的文件系统](../security/encryption.md)，所有文件都会在本地加密后才上传到后端对象存储，包括元数据自动备份文件，也会加密后才上传至对象存储。这与 `dump` 命令不同，`dump` 导出的元数据永远是明文的。
 
 对于加密文件系统，在恢复自动备份的元数据时需要额外设置 `JFS_RSA_PASSPHRASE` 环境变量，以及指定 RSA 私钥和加密算法：
 

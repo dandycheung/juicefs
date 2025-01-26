@@ -22,14 +22,18 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"os"
+	"os/user"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/juicedata/juicefs/pkg/object"
 	osync "github.com/juicedata/juicefs/pkg/sync"
 	"github.com/juicedata/juicefs/pkg/utils"
@@ -43,7 +47,7 @@ func cmdObjbench() *cli.Command {
 		Action:    objbench,
 		Category:  "TOOL",
 		Usage:     "Run benchmarks on an object storage",
-		ArgsUsage: "BUCKET",
+		ArgsUsage: "ENDPOINT",
 		Description: `
 Run basic benchmarks on the target object storage to test if it works as expected.
 
@@ -58,7 +62,7 @@ Details: https://juicefs.com/docs/community/performance_evaluation_guide#juicefs
 			&cli.StringFlag{
 				Name:  "storage",
 				Value: "file",
-				Usage: "object storage type (e.g. s3, gcs, oss, cos)",
+				Usage: "object storage type (e.g. s3, gs, oss, cos)",
 			},
 			&cli.StringFlag{
 				Name:  "access-key",
@@ -72,19 +76,19 @@ Details: https://juicefs.com/docs/community/performance_evaluation_guide#juicefs
 				Name:  "session-token",
 				Usage: "session token for object storage",
 			},
-			&cli.UintFlag{
+			&cli.StringFlag{
 				Name:  "block-size",
-				Value: 4096,
+				Value: "4M",
 				Usage: "size of each IO block in KiB",
 			},
-			&cli.UintFlag{
+			&cli.StringFlag{
 				Name:  "big-object-size",
-				Value: 1024,
+				Value: "1G",
 				Usage: "size of each big object in MiB",
 			},
-			&cli.UintFlag{
+			&cli.StringFlag{
 				Name:  "small-object-size",
-				Value: 128,
+				Value: "128K",
 				Usage: "size of each small object in KiB",
 			},
 			&cli.UintFlag{
@@ -115,12 +119,21 @@ var (
 
 type warning error
 
+var groupName string
+var listCount, bCount, sCount int
+
 func objbench(ctx *cli.Context) error {
 	setup(ctx, 1)
-	for _, name := range []string{"big-object-size", "small-object-size", "block-size", "small-objects", "threads"} {
+	for _, name := range []string{"small-objects", "threads"} {
 		if ctx.Uint(name) == 0 {
 			logger.Fatalf("%s should not be set to zero", name)
 		}
+	}
+	bSize := int(utils.ParseBytes(ctx, "block-size", 'K'))
+	fsize := int(utils.ParseBytes(ctx, "big-object-size", 'M'))
+	smallBSize := int(utils.ParseBytes(ctx, "small-object-size", 'K'))
+	if bSize == 0 || fsize == 0 || smallBSize == 0 {
+		logger.Fatalf("block-size, big-object-size and small-object-size should not be zero")
 	}
 	ak, sk, token := ctx.String("access-key"), ctx.String("secret-key"), ctx.String("session-token")
 	if ak == "" {
@@ -132,7 +145,22 @@ func objbench(ctx *cli.Context) error {
 	if token == "" {
 		token = os.Getenv("SESSION_TOKEN")
 	}
-	blobOrigin, err := object.CreateStorage(strings.ToLower(ctx.String("storage")), ctx.Args().First(), ak, sk, token)
+	endpoint := ctx.Args().First()
+	storageType := strings.ToLower(ctx.String("storage"))
+	if storageType == "file" {
+		if strings.Contains(endpoint, "://") {
+			warn("The bucket \"%s\" doesn't look like a file path.", endpoint)
+			warn("Did you forget to specify the `--storage <type>`?")
+			if !userConfirmed() {
+				return errors.New("Aborted")
+			}
+		}
+		var err error
+		if endpoint, err = filepath.Abs(endpoint); err != nil {
+			logger.Fatalf("invalid path: %s", err)
+		}
+	}
+	blobOrigin, err := object.CreateStorage(storageType, endpoint, ak, sk, token)
 	if err != nil {
 		logger.Fatalf("create storage failed: %v", err)
 	}
@@ -142,11 +170,12 @@ func objbench(ctx *cli.Context) error {
 	defer func() {
 		_ = blobOrigin.Delete(prefix)
 	}()
-	bSize := int(ctx.Uint("block-size")) << 10
-	fsize := int(ctx.Uint("big-object-size")) << 20
-	smallBSize := int(ctx.Uint("small-object-size")) << 10
-	bCount := int(math.Ceil(float64(fsize) / float64(bSize)))
-	sCount := int(ctx.Uint("small-objects"))
+	bCount = int(math.Ceil(float64(fsize) / float64(bSize)))
+	sCount = int(ctx.Uint("small-objects"))
+	listCount = sCount + bCount
+	if listCount > 1000 {
+		listCount = 1000
+	}
 	threads := int(ctx.Uint("threads"))
 	colorful := utils.SupportANSIColor(os.Stdout.Fd())
 	progress := utils.NewProgress(false)
@@ -156,7 +185,18 @@ func objbench(ctx *cli.Context) error {
 		pass = fmt.Sprintf("%s%dm%s%s", COLOR_SEQ, GREEN, pass, RESET_SEQ)
 		failed = fmt.Sprintf("%s%dm%s%s", COLOR_SEQ, RED, failed, RESET_SEQ)
 	}
-
+	if runtime.GOOS != "windows" {
+		nobody, err := user.Lookup("nobody")
+		if err != nil {
+			logger.Fatalf("lookup nobody user failed: %v", err)
+		} else {
+			group, err := user.LookupGroupId(nobody.Gid)
+			if err != nil {
+				logger.Fatalf("lookup nobody's group failed: %v", err)
+			}
+			groupName = group.Name
+		}
+	}
 	if ctx.Bool("skip-functional-tests") {
 		if err := blob.Create(); err != nil {
 			return fmt.Errorf("can't create bucket: %s", err)
@@ -181,7 +221,7 @@ func objbench(ctx *cli.Context) error {
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("smallput", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("smallput", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -194,7 +234,7 @@ func objbench(ctx *cli.Context) error {
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("smallget", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("smallget", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -208,7 +248,7 @@ func objbench(ctx *cli.Context) error {
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("put", float64(bSize>>20*bCount)/cost, float64(threads)*cost*1000/float64(bCount), 2, colorful)
+					line[1], line[2] = colorize("put", float64(bSize)/1024/1024*float64(bCount)/cost, float64(threads)*cost*1000/float64(bCount), 2, colorful)
 					line[1] += " MiB/s"
 					line[2] += " ms/object"
 				}
@@ -219,15 +259,10 @@ func objbench(ctx *cli.Context) error {
 			count:    bCount,
 			title:    "download objects",
 			startKey: sCount,
-			after: func(blob object.ObjectStorage) {
-				for i := sCount; i < sCount+bCount; i++ {
-					_ = blob.Delete(strconv.Itoa(i))
-				}
-			},
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("get", float64(bSize>>20*bCount)/cost, float64(threads)*cost*1000/float64(bCount), 2, colorful)
+					line[1], line[2] = colorize("get", float64(bSize)/1024/1024*float64(bCount)/cost, float64(threads)*cost*1000/float64(bCount), 2, colorful)
 					line[1] += " MiB/s"
 					line[2] += " ms/object"
 				}
@@ -236,24 +271,24 @@ func objbench(ctx *cli.Context) error {
 		}, {
 			name:  "list",
 			title: "list objects",
-			count: 100,
+			count: threads,
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("list", float64(sCount)*100/cost, float64(threads)*cost*10, 2, colorful)
+					line[1], line[2] = colorize("list", float64(listCount)*float64(threads)/cost, cost*1000, 2, colorful)
 					line[1] += " objects/s"
-					line[2] += " ms/op"
+					line[2] += fmt.Sprintf(" ms/ %d objects", listCount)
 				}
 				return line
 			},
 		}, {
 			name:  "head",
-			count: sCount,
+			count: sCount + bCount,
 			title: "head objects",
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("head", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("head", float64(sCount+bCount)/cost, float64(threads)*cost*1000/float64(sCount+bCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -261,12 +296,12 @@ func objbench(ctx *cli.Context) error {
 			},
 		}, {
 			name:  "chtimes",
-			count: sCount,
+			count: sCount + bCount,
 			title: "update mtime",
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("chtimes", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("chtimes", float64(sCount+bCount)/cost, float64(threads)*cost*1000/float64(sCount+bCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -274,12 +309,12 @@ func objbench(ctx *cli.Context) error {
 			},
 		}, {
 			name:  "chmod",
-			count: sCount,
+			count: sCount + bCount,
 			title: "change permissions",
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("chmod", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("chmod", float64(sCount+bCount)/cost, float64(threads)*cost*1000/float64(sCount+bCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -287,12 +322,12 @@ func objbench(ctx *cli.Context) error {
 			},
 		}, {
 			name:  "chown",
-			count: sCount,
+			count: sCount + bCount,
 			title: "change owner/group",
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("chown", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("chown", float64(sCount+bCount)/cost, float64(threads)*cost*1000/float64(sCount+bCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -300,12 +335,12 @@ func objbench(ctx *cli.Context) error {
 			},
 		}, {
 			name:  "delete",
-			count: sCount,
+			count: sCount + bCount,
 			title: "delete objects",
 			getResult: func(cost float64) []string {
 				line := []string{"", nspt, nspt}
 				if cost > 0 {
-					line[1], line[2] = colorize("delete", float64(sCount)/cost, float64(threads)*cost*1000/float64(sCount), 1, colorful)
+					line[1], line[2] = colorize("delete", float64(sCount+bCount)/cost, float64(threads)*cost*1000/float64(sCount+bCount), 2, colorful)
 					line[1] += " objects/s"
 					line[2] += " ms/object"
 				}
@@ -320,21 +355,25 @@ func objbench(ctx *cli.Context) error {
 		threads:     threads,
 		seed:        make([]byte, bSize),
 		smallSeed:   make([]byte, smallBSize),
+		buffPool: &sync.Pool{New: func() interface{} {
+			buff := make([]byte, bSize)
+			return &buff
+		}},
+		smallBuffPool: &sync.Pool{New: func() interface{} {
+			buff := make([]byte, smallBSize)
+			return &buff
+		}},
 	}
-	rand.Read(bm.seed)
-	rand.Read(bm.smallSeed)
+	utils.RandRead(bm.seed)
+	utils.RandRead(bm.smallSeed)
 
 	for _, api := range apis {
 		pResult = append(pResult, bm.run(api))
 	}
 	progress.Done()
 
-	for i := bCount; i < bCount*2; i++ {
-		_ = bm.delete(strconv.Itoa(i), 0)
-	}
-
-	fmt.Printf("Benchmark finished! block-size: %d KiB, big-object-size: %d MiB, small-object-size: %d KiB, small-objects: %d, NumThreads: %d\n",
-		ctx.Uint("block-size"), ctx.Uint("big-object-size"), ctx.Uint("small-object-size"), sCount, threads)
+	fmt.Printf("Benchmark finished! block-size: %s, big-object-size: %s, small-object-size: %s, small-objects: %d, NumThreads: %d\n",
+		humanize.IBytes(uint64(bSize)), humanize.IBytes(uint64(fsize)), humanize.IBytes(uint64(smallBSize)), sCount, threads)
 
 	// adjust the print order
 	pResult[1], pResult[3] = pResult[3], pResult[1]
@@ -360,7 +399,12 @@ var resultRangeForObj = map[string][4]float64{
 
 func colorize(item string, value, cost float64, prec int, colorful bool) (string, string) {
 	svalue := strconv.FormatFloat(value, 'f', prec, 64)
-	scost := strconv.FormatFloat(cost, 'f', 2, 64)
+	var fmtMode byte = 'f'
+	if cost < 0.01 {
+		// For 'g' and 'G' it is the maximum number of significant digits
+		fmtMode = 'g'
+	}
+	scost := strconv.FormatFloat(cost, byte(fmtMode), 2, 64)
 	if colorful {
 		r, ok := resultRangeForObj[item]
 		if !ok {
@@ -393,14 +437,14 @@ type apiInfo struct {
 	count     int
 	startKey  int
 	getResult func(cost float64) []string
-	after     func(blob object.ObjectStorage)
 }
 
 type benchMarkObj struct {
-	progressBar     *utils.Progress
-	blob            object.ObjectStorage
-	threads         int
-	seed, smallSeed []byte
+	progressBar             *utils.Progress
+	blob                    object.ObjectStorage
+	threads                 int
+	seed, smallSeed         []byte
+	buffPool, smallBuffPool *sync.Pool
 }
 
 func (bm *benchMarkObj) run(api apiInfo) []string {
@@ -442,12 +486,14 @@ func (bm *benchMarkObj) run(api apiInfo) []string {
 	var wg sync.WaitGroup
 	pool := make(chan struct{}, bm.threads)
 	count := api.count
-	if api.count != 0 {
-		count = api.count
+	var bar *utils.Bar
+	if api.name == "list" {
+		bar = bm.progressBar.AddCountBar(api.title, int64(listCount)*int64(count))
+	} else {
+		bar = bm.progressBar.AddCountBar(api.title, int64(count))
 	}
-	bar := bm.progressBar.AddCountBar(api.title, int64(count))
 	var err error
-	start := time.Now()
+	var duration int64
 	for i := api.startKey; i < api.startKey+count; i++ {
 		pool <- struct{}{}
 		wg.Add(1)
@@ -456,18 +502,21 @@ func (bm *benchMarkObj) run(api apiInfo) []string {
 				<-pool
 				wg.Done()
 			}()
+			start := time.Now()
 			if e := fn(strconv.Itoa(key), api.startKey); e != nil {
 				err = e
 			}
-			bar.Increment()
+			atomic.AddInt64(&duration, time.Since(start).Microseconds())
+			if api.name == "list" {
+				bar.IncrInt64(int64(listCount))
+			} else {
+				bar.Increment()
+			}
 		}(i)
 	}
 	wg.Wait()
 	bar.Done()
-	line := api.getResult(time.Since(start).Seconds())
-	if api.after != nil {
-		api.after(bm.blob)
-	}
+	line := api.getResult(float64(duration) / float64(bm.threads) / float64(1000) / float64(1000))
 	if err != nil {
 		logger.Errorf("%s test failed: %s", api.name, err)
 		return []string{api.title, failed, failed}
@@ -476,40 +525,57 @@ func (bm *benchMarkObj) run(api apiInfo) []string {
 	return line
 }
 
-func getMockData(seed []byte, idx int) []byte {
+func getMockData(seed []byte, idx int, result *[]byte) {
 	size := len(seed)
-	if size == 0 {
-		return nil
+	rSize := len(*result)
+	if size == 0 || rSize == 0 {
+		return
 	}
-	content := make([]byte, size)
-	if idx == 0 {
-		content = seed
+	i := idx % size
+	if size-i > rSize {
+		copy(*result, seed[i:i+rSize])
 	} else {
-		i := idx % size
-		copy(content[:size-i], seed[i:size])
-		copy(content[size-i:size], seed[:i])
+		copy((*result)[:size-i], seed[i:size])
+		copy((*result)[size-i:rSize], seed[:rSize-(size-i)])
 	}
-	return content
+
 }
 
 func (bm *benchMarkObj) put(key string, startKey int) error {
 	idx, _ := strconv.Atoi(key)
-	return bm.blob.Put(key, bytes.NewReader(getMockData(bm.seed, idx-startKey)))
+	if idx-startKey == 0 {
+		return bm.blob.Put(key, bytes.NewReader(bm.seed))
+	}
+	buff := bm.buffPool.Get().(*[]byte)
+	defer bm.buffPool.Put(buff)
+	getMockData(bm.seed, idx-startKey, buff)
+	return bm.blob.Put(key, bytes.NewReader(*buff))
 }
 
 func (bm *benchMarkObj) smallPut(key string, startKey int) error {
 	idx, _ := strconv.Atoi(key)
-	return bm.blob.Put(key, bytes.NewReader(getMockData(bm.smallSeed, idx)))
+	if idx == 0 {
+		return bm.blob.Put(key, bytes.NewReader(bm.smallSeed))
+	}
+
+	buff := bm.smallBuffPool.Get().(*[]byte)
+	defer bm.smallBuffPool.Put(buff)
+	getMockData(bm.smallSeed, idx-startKey, buff)
+	return bm.blob.Put(key, bytes.NewReader(*buff))
 }
 
-func getAndCheckN(blob object.ObjectStorage, key string, seed []byte, getOrgIdx func(idx int) int) error {
+func getAndCheckN(blob object.ObjectStorage, key string, seed []byte, pool *sync.Pool, getOrgIdx func(idx int) int) error {
 	idx, _ := strconv.Atoi(key)
 	r, err := blob.Get(key, 0, -1)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	content, err := io.ReadAll(r)
+	content := pool.Get().(*[]byte)
+	defer pool.Put(content)
+
+	var n int
+	n, err = io.ReadFull(r, *content)
 	if err != nil {
 		return err
 	}
@@ -519,20 +585,32 @@ func getAndCheckN(blob object.ObjectStorage, key string, seed []byte, getOrgIdx 
 	if l < checkN {
 		checkN = l
 	}
-	if len(content) != len(seed) || !bytes.Equal(content[:checkN], getMockData(seed, orgIdx)[:checkN]) {
+
+	// if orgIdx is 0, mockdata is the same as the seed
+	var preNMockData []byte
+	if orgIdx == 0 {
+		preNMockData = seed[:checkN]
+	} else {
+		mockResult := pool.Get().(*[]byte)
+		defer pool.Put(mockResult)
+		preNMockData = (*mockResult)[:checkN]
+		getMockData(seed, orgIdx, &preNMockData)
+	}
+
+	if n != len(seed) || !bytes.Equal((*content)[:checkN], preNMockData) {
 		return fmt.Errorf("the downloaded content is incorrect")
 	}
 	return nil
 }
 
 func (bm *benchMarkObj) get(key string, startKey int) error {
-	return getAndCheckN(bm.blob, key, bm.seed, func(idx int) int {
+	return getAndCheckN(bm.blob, key, bm.seed, bm.buffPool, func(idx int) int {
 		return idx - startKey
 	})
 }
 
 func (bm *benchMarkObj) smallGet(key string, startKey int) error {
-	return getAndCheckN(bm.blob, key, bm.smallSeed, func(idx int) int {
+	return getAndCheckN(bm.blob, key, bm.smallSeed, bm.smallBuffPool, func(idx int) int {
 		return idx
 	})
 }
@@ -547,14 +625,14 @@ func (bm *benchMarkObj) head(key string, startKey int) error {
 }
 
 func (bm *benchMarkObj) list(key string, startKey int) error {
-	result, err := osync.ListAll(bm.blob, "", "")
+	result, err := osync.ListAll(bm.blob, "", "0", "999", true)
 	for range result {
 	}
 	return err
 }
 
 func (bm *benchMarkObj) chown(key string, startKey int) error {
-	return bm.blob.(object.FileSystem).Chown(key, "nobody", "nobody")
+	return bm.blob.(object.FileSystem).Chown(key, "nobody", groupName)
 }
 
 func (bm *benchMarkObj) chmod(key string, startKey int) error {
@@ -566,11 +644,7 @@ func (bm *benchMarkObj) chtimes(key string, startKey int) error {
 }
 
 func listAll(s object.ObjectStorage, prefix, marker string, limit int64) ([]object.Object, error) {
-	r, err := s.List(prefix, marker, "", limit)
-	if !errors.Is(err, utils.ENOTSUP) {
-		return r, err
-	}
-	ch, err := s.ListAll(prefix, marker)
+	ch, err := object.ListAll(s, prefix, marker, true)
 	if err == nil {
 		objs := make([]object.Object, 0)
 		for obj := range ch {
@@ -584,6 +658,7 @@ func listAll(s object.ObjectStorage, prefix, marker string, limit int64) ([]obje
 }
 
 var syncTests = map[string]bool{
+	"special key":         true,
 	"put a big object":    true,
 	"put an empty object": true,
 	"multipart upload":    true,
@@ -633,6 +708,7 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 		if err != nil {
 			return "", err
 		}
+		defer r.Close()
 		data, err := io.ReadAll(r)
 		if err != nil {
 			return "", err
@@ -657,7 +733,7 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 
 	runCase("create a bucket", func(blob object.ObjectStorage) error {
 		created := true
-		if err := blob.Put(key, bytes.NewReader(nil)); err != nil {
+		if err := blob.Put(key, bytes.NewReader([]byte("1"))); err != nil {
 			created = false
 		}
 		defer blob.Delete(key) //nolint:errcheck
@@ -873,12 +949,12 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 	})
 
 	runCase("special key", func(blob object.ObjectStorage) error {
-		key := "测试编码文件" + `{"name":"juicefs"}` + string('\u001F')
+		key := "测试编码文件" + `{"name":"juicefs"}` + string('\u001F') + "%uFF081%uFF09.jpg"
 		defer blob.Delete(key) //nolint:errcheck
-		if err := blob.Put(key, bytes.NewReader(nil)); err != nil {
+		if err := blob.Put(key, bytes.NewReader([]byte("1"))); err != nil {
 			return fmt.Errorf("put encode file failed: %s", err)
 		} else {
-			if resp, err := blob.List("", "测试编码文件", "", 1); err != nil && err != utils.ENOTSUP {
+			if resp, _, _, err := blob.List("", "测试编码文件", "", "", 1, true); err != nil && err != utils.ENOTSUP {
 				return fmt.Errorf("list encode file failed %s", err)
 			} else if len(resp) == 1 && resp[0].Key() != key {
 				return fmt.Errorf("list encode file failed: expect key %s, but got %s", key, resp[0].Key())
@@ -891,14 +967,14 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 		fsize := 256 << 20
 		buffL := 4 << 20
 		buff := make([]byte, buffL)
-		rand.Read(buff)
+		utils.RandRead(buff)
 		count := int(math.Floor(float64(fsize) / float64(buffL)))
 		content := make([]byte, fsize)
 		for i := 0; i < count; i++ {
 			copy(content[i*buffL:(i+1)*buffL], buff)
 		}
 		if err := blob.Put(key, bytes.NewReader(content)); err != nil {
-			return fmt.Errorf("put big object failed: %s", err)
+			return err
 		}
 		defer blob.Delete(key) //nolint:errcheck
 		return nil
@@ -908,12 +984,12 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 		// Copy empty objects
 		defer blob.Delete("empty_test_file") //nolint:errcheck
 		if err := blob.Put("empty_test_file", bytes.NewReader([]byte{})); err != nil {
-			return fmt.Errorf("put empty object failed: %s", err)
+			return err
 		}
 
 		// Copy `/` suffixed object
 		defer blob.Delete("slash_test_file/") //nolint:errcheck
-		if err := blob.Put("slash_test_file/", bytes.NewReader([]byte{})); err != nil {
+		if err := blob.Put("slash_test_file/", bytes.NewReader([]byte("1"))); err != nil {
 			return fmt.Errorf("put `/` suffixed object failed: %s", err)
 		}
 		return nil
@@ -933,11 +1009,12 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 			}
 			total := 3
 			seed := make([]byte, upload.MinPartSize)
-			rand.Read(seed)
+			utils.RandRead(seed)
 			parts := make([]*object.Part, total)
 			content := make([][]byte, total)
 			for i := 0; i < total; i++ {
-				content[i] = getMockData(seed, i)
+				content[i] = make([]byte, upload.MinPartSize)
+				getMockData(seed, i, &content[i])
 			}
 			var eg errgroup.Group
 			eg.SetLimit(4)
@@ -957,7 +1034,7 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 				return err
 			}
 			// overwrite the first part
-			firstPartContent := append(getMockData(seed, 0), getMockData(seed, 0)...)
+			firstPartContent := append(seed, seed...)
 			if parts[0], err = blob.UploadPart(key, upload.UploadID, 1, firstPartContent); err != nil {
 				return fmt.Errorf("multipart upload error: %v", err)
 			}
@@ -993,7 +1070,7 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 		if (strings.HasPrefix(blob.String(), "file://") || strings.HasPrefix(blob.String(), "jfs://")) && os.Getuid() != 0 {
 			return errors.New("root required")
 		}
-		if err := fi.Chown(key, "nobody", "nobody"); err != nil {
+		if err := fi.Chown(key, "nobody", groupName); err != nil {
 			return fmt.Errorf("failed to chown object %s", err)
 		}
 		if objInfo, err := blob.Head(key); err != nil {
@@ -1002,8 +1079,8 @@ func functionalTesting(blob object.ObjectStorage, result *[][]string, colorful b
 			if info.Owner() != "nobody" {
 				return fmt.Errorf("expect owner nobody but got %s", info.Owner())
 			}
-			if info.Group() != "nobody" {
-				return fmt.Errorf("expect group nobody but got %s", info.Group())
+			if info.Group() != groupName {
+				return fmt.Errorf("expect group %s but got %s", groupName, info.Group())
 			}
 		}
 		return nil

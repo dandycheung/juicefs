@@ -34,6 +34,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
+	"github.com/aws/aws-sdk-go/aws"
 )
 
 type wasb struct {
@@ -42,7 +43,6 @@ type wasb struct {
 	azblobCli *azblob.Client
 	sc        string
 	cName     string
-	marker    string
 }
 
 func (b *wasb) String() string {
@@ -77,11 +77,14 @@ func (b *wasb) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (b *wasb) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (b *wasb) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	download, err := b.container.NewBlobClient(key).DownloadStream(ctx, &azblob.DownloadStreamOptions{Range: blob2.HTTPRange{Offset: off, Count: limit}})
 	if err != nil {
 		return nil, err
 	}
+	attrs := applyGetters(getters...)
+	// TODO fire another property request to get the actual storage class
+	attrs.SetRequestID(aws.StringValue(download.RequestID)).SetStorageClass(b.sc)
 	return download.Body, err
 }
 
@@ -94,12 +97,14 @@ func str2Tier(tier string) *blob2.AccessTier {
 	return nil
 }
 
-func (b *wasb) Put(key string, data io.Reader) error {
+func (b *wasb) Put(key string, data io.Reader, getters ...AttrGetter) error {
 	options := azblob.UploadStreamOptions{}
 	if b.sc != "" {
 		options.AccessTier = str2Tier(b.sc)
 	}
-	_, err := b.azblobCli.UploadStream(ctx, b.cName, key, data, &options)
+	resp, err := b.azblobCli.UploadStream(ctx, b.cName, key, data, &options)
+	attrs := applyGetters(getters...)
+	attrs.SetRequestID(aws.StringValue(resp.RequestID)).SetStorageClass(b.sc)
 	return err
 }
 
@@ -118,62 +123,59 @@ func (b *wasb) Copy(dst, src string) error {
 	return err
 }
 
-func (b *wasb) Delete(key string) error {
-	_, err := b.container.NewBlobClient(key).Delete(ctx, nil)
+func (b *wasb) Delete(key string, getters ...AttrGetter) error {
+	resp, err := b.container.NewBlobClient(key).Delete(ctx, nil)
 	if err != nil {
 		if e, ok := err.(*azcore.ResponseError); ok && e.ErrorCode == string(bloberror.BlobNotFound) {
 			err = nil
 		}
 	}
+	attrs := applyGetters(getters...)
+	attrs.SetRequestID(aws.StringValue(resp.RequestID))
 	return err
 }
 
-func (b *wasb) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (b *wasb) List(prefix, startAfter, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if delimiter != "" {
-		return nil, notSupportedDelimiter
-	}
-	// todo
-	if marker != "" {
-		if b.marker == "" {
-			// last page
-			return nil, nil
-		}
-		marker = b.marker
+		return nil, false, "", notSupported
 	}
 
 	limit32 := int32(limit)
-
-	pager := b.azblobCli.NewListBlobsFlatPager(b.cName, &azblob.ListBlobsFlatOptions{Prefix: &prefix, Marker: &marker, MaxResults: &(limit32)})
+	pager := b.azblobCli.NewListBlobsFlatPager(b.cName, &azblob.ListBlobsFlatOptions{Prefix: &prefix, Marker: &token, MaxResults: &limit32})
 	page, err := pager.NextPage(ctx)
 	if err != nil {
-		return nil, err
-	}
-	if pager.More() {
-		b.marker = *page.NextMarker
-	} else {
-		b.marker = ""
+		return nil, false, "", err
 	}
 	var n int
 	if page.Segment != nil {
 		n = len(page.Segment.BlobItems)
 	}
-	objs := make([]Object, n)
+	objs := make([]Object, 0, n)
 	for i := 0; i < n; i++ {
 		blob := page.Segment.BlobItems[i]
+		if *blob.Name <= startAfter {
+			continue
+		}
 		mtime := blob.Properties.LastModified
-		objs[i] = &obj{
+		objs = append(objs, &obj{
 			*blob.Name,
 			*blob.Properties.ContentLength,
 			*mtime,
 			strings.HasSuffix(*blob.Name, "/"),
 			string(*blob.Properties.AccessTier),
-		}
+		})
 	}
-	return objs, nil
+
+	var nextMarker string
+	if pager.More() {
+		nextMarker = *page.NextMarker
+	}
+	return objs, pager.More(), nextMarker, nil
 }
 
-func (b *wasb) SetStorageClass(sc string) {
+func (b *wasb) SetStorageClass(sc string) error {
 	b.sc = sc
+	return nil
 }
 
 func autoWasbEndpoint(containerName, accountName, scheme string, credential *azblob.SharedKeyCredential) (string, error) {

@@ -49,7 +49,7 @@ func (t *tosClient) Limits() Limits {
 	return Limits{
 		IsSupportMultipartUpload: true,
 		IsSupportUploadPartCopy:  true,
-		MinPartSize:              5 << 20,
+		MinPartSize:              4 << 20,
 		MaxPartSize:              5 << 30,
 		MaxPartCount:             10000,
 	}
@@ -65,13 +65,17 @@ func (t *tosClient) Create() error {
 	return err
 }
 
-func (t *tosClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (t *tosClient) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	rangeStr := getRange(off, limit)
 	resp, err := t.client.GetObjectV2(context.Background(), &tos.GetObjectV2Input{
 		Bucket: t.bucket,
 		Key:    key,
 		Range:  rangeStr, // When Range and RangeStart & RangeEnd appear together, range is preferred
 	})
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.RequestID).SetStorageClass(string(resp.StorageClass))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -82,8 +86,8 @@ func (t *tosClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return resp.Content, nil
 }
 
-func (t *tosClient) Put(key string, in io.Reader) error {
-	_, err := t.client.PutObjectV2(context.Background(), &tos.PutObjectV2Input{
+func (t *tosClient) Put(key string, in io.Reader, getters ...AttrGetter) error {
+	resp, err := t.client.PutObjectV2(context.Background(), &tos.PutObjectV2Input{
 		PutObjectBasicInput: tos.PutObjectBasicInput{
 			Bucket:       t.bucket,
 			Key:          key,
@@ -91,14 +95,22 @@ func (t *tosClient) Put(key string, in io.Reader) error {
 		},
 		Content: in,
 	})
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.RequestID).SetStorageClass(t.sc)
+	}
 	return err
 }
 
-func (t *tosClient) Delete(key string) error {
-	_, err := t.client.DeleteObjectV2(context.Background(), &tos.DeleteObjectV2Input{
+func (t *tosClient) Delete(key string, getters ...AttrGetter) error {
+	resp, err := t.client.DeleteObjectV2(context.Background(), &tos.DeleteObjectV2Input{
 		Bucket: t.bucket,
 		Key:    key,
 	})
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.RequestID)
+	}
 	return err
 }
 
@@ -122,25 +134,24 @@ func (t *tosClient) Head(key string) (Object, error) {
 	}, err
 }
 
-func (t *tosClient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
-	resp, err := t.client.ListObjectsV2(context.Background(), &tos.ListObjectsV2Input{
-		Bucket: t.bucket,
-		ListObjectsInput: tos.ListObjectsInput{
-			Delimiter: delimiter,
-			Prefix:    prefix,
-			Marker:    marker,
-			MaxKeys:   int(limit),
-		},
+func (t *tosClient) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
+	resp, err := t.client.ListObjectsType2(context.Background(), &tos.ListObjectsType2Input{
+		Bucket:            t.bucket,
+		Delimiter:         delimiter,
+		Prefix:            prefix,
+		StartAfter:        start,
+		MaxKeys:           int(limit),
+		ContinuationToken: token,
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(resp.Contents)
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
-		if !strings.HasPrefix(o.Key, prefix) || o.Key < marker {
-			return nil, fmt.Errorf("found invalid key %s from List, prefix: %s, marker: %s", o.Key, prefix, marker)
+		if !strings.HasPrefix(o.Key, prefix) || o.Key <= start {
+			return nil, false, "", fmt.Errorf("found invalid key %s from List, prefix: %s, marker: %s", o.Key, prefix, start)
 		}
 		objs[i] = &obj{
 			o.Key,
@@ -156,10 +167,10 @@ func (t *tosClient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	return objs, resp.IsTruncated, resp.NextContinuationToken, nil
 }
 
-func (t *tosClient) ListAll(prefix, marker string) (<-chan Object, error) {
+func (t *tosClient) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	return nil, notSupported
 }
 
@@ -258,8 +269,9 @@ func (t *tosClient) Copy(dst, src string) error {
 	return err
 }
 
-func (t *tosClient) SetStorageClass(sc string) {
+func (t *tosClient) SetStorageClass(sc string) error {
 	t.sc = sc
+	return nil
 }
 
 func newTOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {

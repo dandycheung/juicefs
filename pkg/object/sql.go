@@ -58,7 +58,7 @@ func (s *sqlStore) String() string {
 	return fmt.Sprintf("%s://%s/", driver, s.addr)
 }
 
-func (s *sqlStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (s *sqlStore) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	var b = blob{Key: []byte(key)}
 	// TODO: range
 	ok, err := s.db.Get(&b)
@@ -78,7 +78,7 @@ func (s *sqlStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewBuffer(data)), nil
 }
 
-func (s *sqlStore) Put(key string, in io.Reader) error {
+func (s *sqlStore) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	d, err := io.ReadAll(in)
 	if err != nil {
 		return err
@@ -123,23 +123,23 @@ func (s *sqlStore) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (s *sqlStore) Delete(key string) error {
+func (s *sqlStore) Delete(key string, getters ...AttrGetter) error {
 	_, err := s.db.Delete(&blob{Key: []byte(key)})
 	return err
 }
 
-func (s *sqlStore) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (s *sqlStore) List(prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if marker == "" {
 		marker = prefix
 	}
 	// todo
 	if delimiter != "" {
-		return nil, notSupportedDelimiter
+		return nil, false, "", notSupported
 	}
 	var bs []blob
-	err := s.db.Where("`key` >= ?", []byte(marker)).Limit(int(limit)).Cols("`key`", "size", "modified").OrderBy("`key`").Find(&bs)
+	err := s.db.Where("`key` > ?", []byte(marker)).Limit(int(limit)).Cols("`key`", "size", "modified").OrderBy("`key`").Find(&bs)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	var objs []Object
 	for _, b := range bs {
@@ -154,7 +154,7 @@ func (s *sqlStore) List(prefix, marker, delimiter string, limit int64) ([]Object
 			break
 		}
 	}
-	return objs, nil
+	return generateListResult(objs, limit)
 }
 
 func newSQLStore(driver, addr, user, password string) (ObjectStorage, error) {
@@ -168,9 +168,9 @@ func newSQLStore(driver, addr, user, password string) (ObjectStorage, error) {
 		uri = "postgres://" + uri
 		driver = "pgx"
 
-		parse, err := url.Parse(addr)
+		parse, err := url.Parse(uri)
 		if err != nil {
-			return nil, fmt.Errorf("parse url %s failed: %s", addr, err)
+			return nil, fmt.Errorf("parse url %s failed: %s", uri, err)
 		}
 		searchPath = parse.Query().Get("search_path")
 		if searchPath != "" {

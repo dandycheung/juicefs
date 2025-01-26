@@ -18,9 +18,11 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/dustin/go-humanize"
 	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/juicedata/juicefs/pkg/utils"
 
 	"github.com/urfave/cli/v2"
 )
@@ -77,7 +79,11 @@ $ juicefs quota delete redis://localhost --path /dir1`,
 				Name:  "path",
 				Usage: "full path of the directory within the volume",
 			},
-			&cli.Uint64Flag{
+			&cli.BoolFlag{
+				Name:  "create",
+				Usage: "create the directory if not exists",
+			},
+			&cli.StringFlag{
 				Name:  "capacity",
 				Usage: "hard quota of the directory limiting its usage of space in GiB",
 			},
@@ -121,13 +127,17 @@ func quota(c *cli.Context) error {
 	removePassword(c.Args().Get(0))
 
 	m := meta.NewClient(c.Args().Get(0), nil)
+	_, err := m.Load(true)
+	if err != nil {
+		logger.Fatalf("Load setting: %s", err)
+	}
 	qs := make(map[string]*meta.Quota)
 	var strict, repair bool
 	if cmd == meta.QuotaSet {
 		strict = c.Bool("strict")
 		q := &meta.Quota{MaxSpace: -1, MaxInodes: -1} // negative means no change
 		if c.IsSet("capacity") {
-			q.MaxSpace = int64(c.Uint64("capacity")) << 30
+			q.MaxSpace = int64(utils.ParseBytes(c, "capacity", 'G'))
 		}
 		if c.IsSet("inodes") {
 			q.MaxInodes = int64(c.Uint64("inodes"))
@@ -138,7 +148,7 @@ func quota(c *cli.Context) error {
 		strict = c.Bool("strict")
 		repair = c.Bool("repair")
 	}
-	if err := m.HandleQuota(meta.Background, cmd, dpath, qs, strict, repair); err != nil {
+	if err := m.HandleQuota(meta.Background(), cmd, dpath, qs, strict, repair, c.Bool("create")); err != nil {
 		return err
 	} else if len(qs) == 0 {
 		return nil
@@ -146,7 +156,13 @@ func quota(c *cli.Context) error {
 
 	result := make([][]string, 1, len(qs)+1)
 	result[0] = []string{"Path", "Size", "Used", "Use%", "Inodes", "IUsed", "IUse%"}
-	for p, q := range qs {
+	paths := make([]string, 0, len(qs))
+	for p := range qs {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		q := qs[p]
 		if q.UsedSpace < 0 {
 			logger.Warnf("Used space of %s is negative (%d), please run `juicefs quota check` to fix it", p, q.UsedSpace)
 			q.UsedSpace = 0

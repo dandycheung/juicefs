@@ -1,6 +1,6 @@
 ---
 title: Use JuiceFS on Hadoop Ecosystem
-sidebar_position: 5
+sidebar_position: 3
 slug: /hadoop_java_sdk
 ---
 
@@ -23,7 +23,7 @@ JuiceFS uses local "User/UID" and "Group/GID" mappings by default, and when used
 
 You should first create at least one JuiceFS file system to provide storage for components related to the Hadoop ecosystem through the JuiceFS Java SDK. When deploying the Java SDK, specify the metadata engine address of the created file system in the configuration file.
 
-To create a file system, please refer to [JuiceFS Quick Start Guide](../getting-started/README.md).
+To create a file system, please refer to [our quick start](../getting-started/standalone.md).
 
 :::note
 If you want to use JuiceFS in a distributed environment, when creating a file system, please plan the object storage and database to be used reasonably to ensure that they can be accessed by each node in the cluster.
@@ -57,7 +57,7 @@ No matter which system environment the client is compiled for, the compiled JAR 
 
 Compilation depends on the following tools:
 
-- [Go](https://golang.org) 1.18+
+- [Go](https://golang.org) 1.20+
 - JDK 8+
 - [Maven](https://maven.apache.org) 3.3+
 - Git
@@ -190,25 +190,28 @@ Please refer to the following table to set the relevant parameters of the JuiceF
 
 #### Other Configurations
 
-| Configuration             | Default Value | Description                                                                                                                                                                 |
-|---------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `juicefs.bucket`          |               | Specify a different endpoint for object storage                                                                                                                             |
-| `juicefs.debug`           | `false`       | Whether enable debug log                                                                                                                                                    |
-| `juicefs.access-log`      |               | Access log path. Ensure Hadoop application has write permission, e.g. `/tmp/juicefs.access.log`. The log file will rotate  automatically to keep at most 7 files.           |
-| `juicefs.superuser`       | `hdfs`        | The super user                                                                                                                                                              |
-| `juicefs.supergroup`      | `supergroup`  | The super user group                                                                                                                                                        |
-| `juicefs.users`           | `null`        | The path of username and UID list file, e.g. `jfs://name/etc/users`. The file format is `<username>:<UID>`, one user per line.                                              |
-| `juicefs.groups`          | `null`        | The path of group name, GID and group members list file, e.g. `jfs://name/etc/groups`. The file format is `<group-name>:<GID>:<username1>,<username2>`, one group per line. |
-| `juicefs.umask`           | `null`        | The umask used when creating files and directories (e.g. `0022`), default value is `fs.permissions.umask-mode`.                                                             |
-| `juicefs.push-gateway`    |               | [Prometheus Pushgateway](https://github.com/prometheus/pushgateway) address, format is `<host>:<port>`.                                                                     |
-| `juicefs.push-auth`       |               | [Prometheus basic auth](https://prometheus.io/docs/guides/basic-auth) information, format is `<username>:<password>`.                                                       |
-| `juicefs.push-graphite`   |               | [Graphite](https://graphiteapp.org) address, format is `<host>:<port>`.                                                                                                     |
-| `juicefs.push-interval`   | 10            | Metric push interval (in seconds)                                                                                                                                           |
-| `juicefs.fast-resolve`    | `true`        | Whether enable faster metadata lookup using Redis Lua script                                                                                                                |
+| Configuration           | Default Value | Description                                                                                                                                                                 |
+|-------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `juicefs.bucket`        |               | Specify a different endpoint for object storage                                                                                                                             |
+| `juicefs.debug`         | `false`       | Whether enable debug log                                                                                                                                                    |
+| `juicefs.access-log`    |               | Access log path. Ensure Hadoop application has write permission, e.g. `/tmp/juicefs.access.log`. The log file will rotate  automatically to keep at most 7 files.           |
+| `juicefs.superuser`     | `hdfs`        | The super user                                                                                                                                                              |
+| `juicefs.supergroup`    | `supergroup`  | The super user group                                                                                                                                                        |
+| `juicefs.users`         | `null`        | The path of username and UID list file, e.g. `jfs://name/etc/users`. The file format is `<username>:<UID>`, one user per line.                                              |
+| `juicefs.groups`        | `null`        | The path of group name, GID and group members list file, e.g. `jfs://name/etc/groups`. The file format is `<group-name>:<GID>:<username1>,<username2>`, one group per line. |
+| `juicefs.umask`         | `null`        | The umask used when creating files and directories (e.g. `0022`), default value is `fs.permissions.umask-mode`.                                                             |
+| `juicefs.push-gateway`  |               | [Prometheus Pushgateway](https://github.com/prometheus/pushgateway) address, format is `<host>:<port>`.                                                                     |
+| `juicefs.push-auth`     |               | [Prometheus basic auth](https://prometheus.io/docs/guides/basic-auth) information, format is `<username>:<password>`.                                                       |
+| `juicefs.push-graphite` |               | [Graphite](https://graphiteapp.org) address, format is `<host>:<port>`.                                                                                                     |
+| `juicefs.push-interval` | 10            | Metric push interval (in seconds)                                                                                                                                           |
+| `juicefs.push-labels`   |               | Metric labels, format is `key1:value1;key2:value2`.                                                                                                                         |
+| `juicefs.fast-resolve`  | `true`        | Whether enable faster metadata lookup using Redis Lua script                                                                                                                |
 | `juicefs.no-usage-report` | `false`       | Whether disable usage reporting. JuiceFS only collects anonymous usage data (e.g. version number), no user or any sensitive data will be collected.                         |
-| `juicefs.no-bgjob`        | `false`       | Disable background jobs (clean-up, backup, etc.)                                                                                                                            |
-| `juicefs.backup-meta`     | 3600          | Interval (in seconds) to automatically backup metadata in the object storage (0 means disable backup)                                                                       |
-| `juicefs.heartbeat`       | 12            | Heartbeat interval (in seconds) between client and metadata engine. It's recommended that all clients use the same value.                                                   |
+| `juicefs.no-bgjob`      | `false`       | Disable background jobs (clean-up, backup, etc.)                                                                                                                            |
+| `juicefs.backup-meta`   | 3600          | Interval (in seconds) to automatically backup metadata in the object storage (0 means disable backup)                                                                       |
+| `juicefs.backup-skip-trash` | `false`       | Skip files and directories in trash when backup metadata.                                                                                                                   |
+| `juicefs.heartbeat`     | 12            | Heartbeat interval (in seconds) between client and metadata engine. It's recommended that all clients use the same value.                                                   |
+| `juicefs.skip-dir-mtime`              | 100ms         | Minimal duration to modify parent dir mtime.                                                                                                                                |
 
 #### Multiple file systems configuration
 
@@ -296,7 +299,7 @@ First you need to add JuiceFS SDK to `classpath` in Kafka Connect, e.g., `/usr/s
 
 While creating a Connect Sink task, configuration needs to be set up as follows:
 
-- Specify `hadoop.conf.dir` as the directory that contains the configuration file `core-site.xml`. If it is not running in Hadoop environment, you can create a seperate directory such as `/usr/local/juicefs/hadoop`, and then add the JuiceFS related configurations to `core-site.xml`.
+- Specify `hadoop.conf.dir` as the directory that contains the configuration file `core-site.xml`. If it is not running in Hadoop environment, you can create a separate directory such as `/usr/local/juicefs/hadoop`, and then add the JuiceFS related configurations to `core-site.xml`.
 - Specify `store.url` as a path starting with `jfs://`.
 
 For example:
@@ -737,6 +740,54 @@ JuiceFS can use local disk as a cache to accelerate data access, the following d
 | q10     | 24              | 28             | 38   |
 
 ![parquet](../images/spark_sql_parquet.png)
+
+## Permission control by Apache Ranger
+
+JuiceFS currently supports path permission control by integrating with Apache Ranger's HDFS module.
+
+### 1. Configurations
+
+| Configuration                     | Default Value | Description                                                                                                                                                                                                                                                                                                                                                                        |
+|-----------------------------------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `juicefs.ranger-rest-url`         |               | `ranger`'s HTTP link url. Not configured means not using this feature.                                                                                                                                                                                                                                                                                                             |
+| `juicefs.ranger-service-name`     |               | `ranger`'s `service name` in `HDFS` module, required                                                                                                                                                                                                                                                                                                                               |
+| `juicefs.ranger-poll-interval-ms` | `30000`       | `ranger`'s interval to refresh cache, default is 30s                                                                                                                                                                                                                                                                                                                               |
+
+### 2. Dependencies
+
+Considering the complexity of the authentication environment and the possibility of dependency conflicts, the JAR packages related to Ranger authentication (such as `ranger-plugins-common-2.3.0.jar`, `ranger-plugins-audit-2.3.0.jar`, etc.) and their dependencies have not been included in the JuiceFS SDK.
+
+If occurred the `ClassNotFound` error when use, it is recommended to import it into the relevant directory (such as `$SPARK-HOME/jars`)
+
+Some dependencies may need：
+
+```shell
+ranger-plugins-common-2.3.0.jar
+ranger-plugins-audit-2.3.0.jar
+gethostname4j-1.0.0.jar
+jackson-jaxrs-1.9.13.jar
+jersey-client-1.19.jar
+jersey-core-1.19.jar
+jna-5.7.0.jar
+```
+
+### 3. Tips
+
+#### 3.1 Ranger version
+
+The code is tested on `Ranger2.3` and `Ranger2.4`. As no other features are used except for `HDFS` module authentication, theoretically all other versions are applicable.
+
+#### 3.2 Ranger Audit
+
+Currently, only support authentication function, and the `Ranger Audit` is disabled.
+
+#### 3.3 Ranger's other parameters
+
+To improve usage efficiency, currently only support some **CORE** parameters of Ranger.
+
+#### 3.4 Security tips
+
+Due to the complete open source of the project, it is unavoidable for users to disrupt permission control by replacing parameters such as `juicefs.ranger.rest-url`. If stricter control is required, it is recommended to compile the code independently and solve the problem by encrypting relevant security parameters.
 
 ## FAQ
 

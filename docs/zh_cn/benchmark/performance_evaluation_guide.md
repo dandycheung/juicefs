@@ -34,13 +34,15 @@ JuiceFS v1.0+ 默认启用了回收站，基准测试会在文件系统中创建
 
 ### `juicefs bench`
 
-[`juicefs bench`](../reference/command_reference.md#bench) 命令可以帮助你快速完成单机性能测试，通过测试结果判断环境配置和性能表现是否正常。假设你已经把 JuiceFS 挂载到了测试机器的 `/mnt/jfs` 位置（如果在 JuiceFS 初始化、挂载方面需要帮助，请参考[快速上手指南](../getting-started/README.md)），执行以下命令即可（推荐 `-p` 参数设置为测试机器的 CPU 核数）：
+[`juicefs bench`](../reference/command_reference.mdx#bench) 命令可以帮助你快速完成单机性能测试，通过测试结果判断环境配置和性能表现是否正常。假设你已经把 JuiceFS 挂载到了测试机器的 `/mnt/jfs` 位置（如果在 JuiceFS 初始化、挂载方面需要帮助，请参考[创建文件系统](../getting-started/standalone.md#juicefs-format)），执行以下命令即可（推荐 `-p` 参数设置为测试机器的 CPU 核数）：
 
 ```bash
 juicefs bench /mnt/jfs -p 4
 ```
 
-测试结果会将各项性能指标显示为绿色，黄色或红色。若您的结果中有红色指标，请先检查相关配置，需要帮助可以在 [GitHub Discussions](https://github.com/juicedata/juicefs/discussions) 详细描述你的问题。
+测试结果以表格形式呈现，其中 `ITEM` 代表测试的项目，`VALUE` 代表每秒的处理能力（吞吐量、文件数、操作数等），`COST` 代表每个文件或操作所需的时间。
+
+各项性能指标会显示为绿色、黄色或红色区分性能表现。若您的结果中有红色指标，请先检查相关配置，需要帮助可以在 [GitHub Discussions](https://github.com/juicedata/juicefs/discussions) 详细描述你的问题。
 
 ![bench](../images/bench-guide-bench.png)
 
@@ -77,7 +79,7 @@ Amazon EFS 的性能与容量线性相关（[参考官方文档](https://docs.aw
 
 ### `juicefs objbench`
 
-[`juicefs objbench`](../reference/command_reference.md#objbench) 命令可以运行一些关于对象存储的测试，用以评估其作为 JuiceFS 的后端存储时的运行情况。以测试 Amazon S3 为例：
+[`juicefs objbench`](../reference/command_reference.mdx#objbench) 命令可以运行一些关于对象存储的测试，用以评估其作为 JuiceFS 的后端存储时的运行情况。以测试 Amazon S3 为例：
 
 ```bash
 juicefs objbench \
@@ -90,6 +92,8 @@ juicefs objbench \
 测试结果如下图所示：
 
 ![JuiceFS Bench](../images/objbench.png)
+
+其中，结果显示为 `not support` 代表所测试的对象存储不支持该项功能。
 
 #### 测试流程
 
@@ -140,7 +144,7 @@ juicefs stats /mnt/jfs --verbosity 1
 
 结果如下，可以将其与上述基准测试流程对照来看，更易理解：
 
-![](../images/bench-guide-stats.png)
+![bench-guide-stats](../images/bench-guide-stats.png)
 
 其中各项指标具体含义参考 [`juicefs stats`](../administration/fault_diagnosis_and_analysis.md#stats)。
 
@@ -160,7 +164,7 @@ juicefs profile juicefs.accesslog --interval 0
 
 其中 `--interval` 参数设置访问日志的采样间隔，设为 0 时用于快速重放一个指定的日志文件，生成统计信息，如下图所示：
 
-![](../images/bench-guide-profile.png)
+![bench-guide-profile](../images/bench-guide-profile.png)
 
 从之前基准测试流程描述可知，本次测试过程一共创建了 `(1 + 100) * 4 = 404` 个文件，每个文件都经历了「创建 → 写入 → 关闭 → 打开 → 读取 → 关闭 → 删除」的过程，因此一共有：
 

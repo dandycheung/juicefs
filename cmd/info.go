@@ -17,10 +17,11 @@
 package cmd
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -73,10 +74,6 @@ $ juicefs info -i 100`,
 
 func info(ctx *cli.Context) error {
 	setup(ctx, 1)
-	if runtime.GOOS == "windows" {
-		logger.Infof("Windows is not supported")
-		return nil
-	}
 	var recursive, strict, raw uint8
 	if ctx.Bool("recursive") {
 		recursive = 1
@@ -87,8 +84,8 @@ func info(ctx *cli.Context) error {
 	if ctx.Bool("raw") {
 		raw = 1
 	}
-	progress := utils.NewProgress(recursive == 0) // only show progress for recursive info
 	for i := 0; i < ctx.Args().Len(); i++ {
+		progress := utils.NewProgress(recursive == 0) // only show progress for recursive info
 		path := ctx.Args().Get(i)
 		dspin := progress.AddDoubleSpinner(path)
 		var d string
@@ -128,29 +125,27 @@ func info(ctx *cli.Context) error {
 		if err != nil {
 			logger.Fatalf("write message: %s", err)
 		}
-		if _, errno := readProgress(f, func(count, size uint64) {
+		data, errno := readProgress(f, func(count, size uint64) {
 			dspin.SetCurrent(int64(count), int64(size))
-		}); errno != 0 {
+		})
+		if errno == syscall.EINVAL {
+			legacyInfo(d, path, inode, recursive, raw)
+			continue
+		} else if errno != 0 {
 			logger.Errorf("failed to get info: %s", syscall.Errno(errno))
 		}
 		dspin.Done()
+		progress.Done()
 
 		var resp vfs.InfoResponse
-		err = resp.Decode(f)
+		err = json.Unmarshal(data, &resp)
 		_ = f.Close()
-		if err == syscall.EINVAL {
-			legacyInfo(d, path, inode, recursive, raw)
-			continue
+		if err == nil && resp.Failed {
+			err = errors.New(resp.Reason)
 		}
-
 		if err != nil {
-			logger.Fatalf("read info: %s", err)
+			logger.Fatalf("info: %s", err)
 		}
-
-		if resp.Failed {
-			logger.Fatalf("failed to get info: %s", resp.Reason)
-		}
-
 		fmt.Println(path, ":")
 		fmt.Printf("  inode: %d\n", resp.Ino)
 		fmt.Printf("  files: %d\n", resp.Summary.Files)
@@ -228,7 +223,6 @@ func info(ctx *cli.Context) error {
 			printResult(results, 0, false)
 		}
 	}
-	progress.Done()
 	return nil
 }
 

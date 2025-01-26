@@ -34,10 +34,13 @@ import (
 )
 
 const (
+	aclCounter     = "aclMaxId"
 	usedSpace      = "usedSpace"
 	totalInodes    = "totalInodes"
 	legacySessions = "sessions"
 )
+
+var counterNames = []string{usedSpace, totalInodes, "nextInode", "nextChunk", "nextSession", "nextTrash"}
 
 const (
 	// fallocate
@@ -58,6 +61,12 @@ const (
 	NoAtime     = "noatime"
 	RelAtime    = "relatime"
 	StrictAtime = "strictatime"
+)
+
+const (
+	MODE_MASK_R = 0b100
+	MODE_MASK_W = 0b010
+	MODE_MASK_X = 0b001
 )
 
 type msgCallbacks struct {
@@ -250,9 +259,6 @@ func updateLocks(ls []plockRecord, nl plockRecord) []plockRecord {
 }
 
 func (m *baseMeta) emptyDir(ctx Context, inode Ino, skipCheckTrash bool, count *uint64, concurrent chan int) syscall.Errno {
-	if st := m.Access(ctx, inode, 3, nil); st != 0 {
-		return st
-	}
 	for {
 		var entries []*Entry
 		if st := m.en.doReaddir(ctx, inode, 0, &entries, 10000); st != 0 && st != syscall.ENOENT {
@@ -260,6 +266,9 @@ func (m *baseMeta) emptyDir(ctx Context, inode Ino, skipCheckTrash bool, count *
 		}
 		if len(entries) == 0 {
 			return 0
+		}
+		if st := m.Access(ctx, inode, MODE_MASK_W|MODE_MASK_X, nil); st != 0 {
+			return st
 		}
 		var wg sync.WaitGroup
 		var status syscall.Errno
@@ -278,14 +287,15 @@ func (m *baseMeta) emptyDir(ctx Context, inode Ino, skipCheckTrash bool, count *
 					wg.Add(1)
 					go func(child Ino, name string) {
 						defer wg.Done()
-						e := m.emptyEntry(ctx, inode, name, child, skipCheckTrash, count, concurrent)
-						if e != 0 && e != syscall.ENOENT {
-							status = e
+						st := m.emptyEntry(ctx, inode, name, child, skipCheckTrash, count, concurrent)
+						if st != 0 && st != syscall.ENOENT {
+							status = st
 						}
 						<-concurrent
 					}(e.Inode, string(e.Name))
 				default:
 					if st := m.emptyEntry(ctx, inode, string(e.Name), e.Inode, skipCheckTrash, count, concurrent); st != 0 && st != syscall.ENOENT {
+						ctx.Cancel()
 						return st
 					}
 				}
@@ -294,6 +304,7 @@ func (m *baseMeta) emptyDir(ctx Context, inode Ino, skipCheckTrash bool, count *
 					atomic.AddUint64(count, 1)
 				}
 				if st := m.Unlink(ctx, inode, string(e.Name), skipCheckTrash); st != 0 && st != syscall.ENOENT {
+					ctx.Cancel()
 					return st
 				}
 			}
@@ -314,6 +325,7 @@ func (m *baseMeta) emptyEntry(ctx Context, parent Ino, name string, inode Ino, s
 	if st == 0 && !isTrash(inode) {
 		st = m.Rmdir(ctx, parent, name, skipCheckTrash)
 		if st == syscall.ENOTEMPTY {
+			// redo when concurrent conflict may happen
 			st = m.emptyEntry(ctx, parent, name, inode, skipCheckTrash, count, concurrent)
 		} else if count != nil {
 			atomic.AddUint64(count, 1)
@@ -322,14 +334,14 @@ func (m *baseMeta) emptyEntry(ctx Context, parent Ino, name string, inode Ino, s
 	return st
 }
 
-func (m *baseMeta) Remove(ctx Context, parent Ino, name string, count *uint64) syscall.Errno {
+func (m *baseMeta) Remove(ctx Context, parent Ino, name string, skipTrash bool, numThreads int, count *uint64) syscall.Errno {
 	parent = m.checkRoot(parent)
-	if st := m.Access(ctx, parent, 3, nil); st != 0 {
+	if st := m.Access(ctx, parent, MODE_MASK_W|MODE_MASK_X, nil); st != 0 {
 		return st
 	}
 	var inode Ino
 	var attr Attr
-	if st := m.Lookup(ctx, parent, name, &inode, &attr); st != 0 {
+	if st := m.Lookup(ctx, parent, name, &inode, &attr, false); st != 0 {
 		return st
 	}
 	if attr.Typ != TypeDirectory {
@@ -338,8 +350,16 @@ func (m *baseMeta) Remove(ctx Context, parent Ino, name string, count *uint64) s
 		}
 		return m.Unlink(ctx, parent, name)
 	}
-	concurrent := make(chan int, 50)
-	return m.emptyEntry(ctx, parent, name, inode, false, count, concurrent)
+	if numThreads <= 0 {
+		logger.Infof("invalid threads number %d , auto adjust to %d", numThreads, RmrDefaultThreads)
+		numThreads = RmrDefaultThreads
+	} else if numThreads > 255 {
+		logger.Infof("threads number %d too large, auto adjust to 255 .", numThreads)
+		numThreads = 255
+	}
+	logger.Debugf("Start emptyEntry with %d concurrent threads .", numThreads)
+	concurrent := make(chan int, numThreads)
+	return m.emptyEntry(ctx, parent, name, inode, skipTrash, count, concurrent)
 }
 
 func (m *baseMeta) GetSummary(ctx Context, inode Ino, summary *Summary, recursive bool, strict bool) syscall.Errno {
@@ -369,7 +389,8 @@ func (m *baseMeta) GetSummary(ctx Context, inode Ino, summary *Summary, recursiv
 func (m *baseMeta) getDirSummary(ctx Context, inode Ino, summary *Summary, recursive bool, strict bool, concurrent chan struct{}, updateProgress func(count uint64, bytes uint64)) syscall.Errno {
 	var entries []*Entry
 	var err syscall.Errno
-	if strict {
+	format := m.getFormat()
+	if strict || !format.DirStats {
 		err = m.en.doReaddir(ctx, inode, 1, &entries, -1)
 	} else {
 		var st *dirStat
@@ -404,7 +425,7 @@ func (m *baseMeta) getDirSummary(ctx Context, inode Ino, summary *Summary, recur
 		} else {
 			atomic.AddUint64(&summary.Files, 1)
 		}
-		if strict {
+		if strict || !format.DirStats {
 			atomic.AddUint64(&summary.Size, uint64(align4K(e.Attr.Length)))
 			if e.Attr.Typ == TypeFile {
 				atomic.AddUint64(&summary.Length, e.Attr.Length)
@@ -417,6 +438,8 @@ func (m *baseMeta) getDirSummary(ctx Context, inode Ino, summary *Summary, recur
 			continue
 		}
 		select {
+		case <-ctx.Done():
+			return syscall.EINTR
 		case err := <-errCh:
 			// TODO: cancel others
 			return err
@@ -506,8 +529,9 @@ func (m *baseMeta) getTreeSummary(ctx Context, tree *TreeSummary, depth, topN ui
 		}
 		child.Dirs++
 		select {
+		case <-ctx.Done():
+			return syscall.EINTR
 		case err = <-errCh:
-			// TODO: cancel context
 			return err
 		case concurrent <- struct{}{}:
 			wg.Add(1)
@@ -547,7 +571,7 @@ func (m *baseMeta) getTreeSummary(ctx Context, tree *TreeSummary, depth, topN ui
 	if len(tree.Children) > int(topN) {
 		omitChild := &TreeSummary{
 			Path: path.Join(tree.Path, "..."),
-			Type: TypeDirectory,
+			Type: TypeFile,
 		}
 		for _, child := range tree.Children[topN:] {
 			omitChild.Size += child.Size
@@ -560,30 +584,16 @@ func (m *baseMeta) getTreeSummary(ctx Context, tree *TreeSummary, depth, topN ui
 }
 
 func (m *baseMeta) atimeNeedsUpdate(attr *Attr, now time.Time) bool {
-	if m.conf.AtimeMode == RelAtime && relatimeNeedUpdate(attr, now) {
-		return true
-	}
-
-	atime := time.Unix(attr.Atime, int64(attr.Atimensec))
-	// update atime only for > 1 second accesses
-	return (m.conf.AtimeMode == StrictAtime) && (now.Sub(atime) > time.Second)
+	return m.conf.AtimeMode != NoAtime && relatimeNeedUpdate(attr, now) ||
+		// update atime only for > 1 second accesses
+		m.conf.AtimeMode == StrictAtime && now.Sub(time.Unix(attr.Atime, int64(attr.Atimensec))) > time.Second
 }
 
 // With relative atime, only update atime if the previous atime is earlier than either the ctime or
 // mtime or if at least a day has passed since the last atime update.
 func relatimeNeedUpdate(attr *Attr, now time.Time) bool {
 	atime := time.Unix(attr.Atime, int64(attr.Atimensec))
-
-	// Is mtime younger than atime? If yes, update atime
-	if time.Unix(attr.Mtime, int64(attr.Mtimensec)).After(atime) {
-		return true
-	}
-
-	// Is ctime younger than atime? If yes, update atime
-	if time.Unix(attr.Ctime, int64(attr.Ctimensec)).After(atime) {
-		return true
-	}
-
-	// Is the previous atime value older than a day? If yes, update atime
-	return now.Sub(atime) > 24*time.Hour
+	mtime := time.Unix(attr.Mtime, int64(attr.Mtimensec))
+	ctime := time.Unix(attr.Ctime, int64(attr.Ctimensec))
+	return mtime.After(atime) || ctime.After(atime) || now.Sub(atime) > 24*time.Hour
 }

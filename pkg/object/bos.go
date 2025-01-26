@@ -34,8 +34,6 @@ import (
 	"github.com/baidubce/bce-sdk-go/services/bos/api"
 )
 
-const bosDefaultRegion = "bj"
-
 type bosclient struct {
 	DefaultObjectStorage
 	bucket string
@@ -55,6 +53,11 @@ func (q *bosclient) Limits() Limits {
 		MaxPartSize:              5 << 30,
 		MaxPartCount:             10000,
 	}
+}
+
+func (q *bosclient) SetStorageClass(sc string) error {
+	q.sc = sc
+	return nil
 }
 
 func (q *bosclient) Create() error {
@@ -88,7 +91,7 @@ func (q *bosclient) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (q *bosclient) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (q *bosclient) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	var r *api.GetObjectResult
 	var err error
 	if limit > 0 {
@@ -101,10 +104,12 @@ func (q *bosclient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	attrs := applyGetters(getters...)
+	attrs.SetStorageClass(r.StorageClass)
 	return r.Body, nil
 }
 
-func (q *bosclient) Put(key string, in io.Reader) error {
+func (q *bosclient) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	b, vlen, err := findLen(in)
 	if err != nil {
 		return err
@@ -118,15 +123,21 @@ func (q *bosclient) Put(key string, in io.Reader) error {
 		args.StorageClass = q.sc
 	}
 	_, err = q.c.PutObject(q.bucket, key, body, args)
+	attrs := applyGetters(getters...)
+	attrs.SetStorageClass(q.sc)
 	return err
 }
 
 func (q *bosclient) Copy(dst, src string) error {
-	_, err := q.c.BasicCopyObject(q.bucket, dst, q.bucket, src)
+	var args *api.CopyObjectArgs
+	if q.sc != "" {
+		args = &api.CopyObjectArgs{ObjectMeta: api.ObjectMeta{StorageClass: q.sc}}
+	}
+	_, err := q.c.CopyObject(q.bucket, dst, q.bucket, src, args)
 	return err
 }
 
-func (q *bosclient) Delete(key string) error {
+func (q *bosclient) Delete(key string, getters ...AttrGetter) error {
 	err := q.c.DeleteObject(q.bucket, key)
 	if err != nil && strings.Contains(err.Error(), "NoSuchKey") {
 		err = nil
@@ -134,14 +145,14 @@ func (q *bosclient) Delete(key string) error {
 	return err
 }
 
-func (q *bosclient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (q *bosclient) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
 	limit_ := int(limit)
-	out, err := q.c.SimpleListObjects(q.bucket, prefix, limit_, marker, delimiter)
+	out, err := q.c.SimpleListObjects(q.bucket, prefix, limit_, start, delimiter)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(out.Contents)
 	objs := make([]Object, n)
@@ -156,7 +167,7 @@ func (q *bosclient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	return objs, out.IsTruncated, out.NextMarker, nil
 }
 
 func (q *bosclient) CreateMultipartUpload(key string) (*MultipartUpload, error) {
@@ -223,12 +234,12 @@ func (q *bosclient) ListUploads(marker string) ([]*PendingPart, string, error) {
 }
 
 func autoBOSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
-	region := bosDefaultRegion
+	region := bce.DEFAULT_REGION
 	if r := os.Getenv("BDCLOUD_DEFAULT_REGION"); r != "" {
 		region = r
 	}
 
-	endpoint := fmt.Sprintf("https://%s.bcebos.com", region)
+	endpoint := fmt.Sprintf("https://%s.%s.bcebos.com", bucketName, region)
 	bosCli, err := bos.NewClient(accessKey, secretKey, endpoint)
 	if err != nil {
 		return "", err
@@ -237,7 +248,7 @@ func autoBOSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
 	if location, err := bosCli.GetBucketLocation(bucketName); err != nil {
 		return "", err
 	} else {
-		return fmt.Sprintf("%s.bcebos.com", location), nil
+		return fmt.Sprintf("%s.%s.bcebos.com", bucketName, location), nil
 	}
 }
 
@@ -250,17 +261,16 @@ func newBOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error)
 		return nil, fmt.Errorf("Invalid endpoint: %v, error: %v", endpoint, err)
 	}
 	hostParts := strings.SplitN(uri.Host, ".", 2)
-	bucketName := hostParts[0]
-	if len(hostParts) > 1 {
-		endpoint = fmt.Sprintf("%s://%s", uri.Scheme, hostParts[1])
+	if len(hostParts) != 2 {
+		return nil, fmt.Errorf("Invalid endpoint: %v", endpoint)
 	}
-
+	bucketName := hostParts[0]
 	if accessKey == "" {
 		accessKey = os.Getenv("BDCLOUD_ACCESS_KEY")
 		secretKey = os.Getenv("BDCLOUD_SECRET_KEY")
 	}
 
-	if len(hostParts) == 1 {
+	if hostParts[1] == "bcebos.com" {
 		if endpoint, err = autoBOSEndpoint(bucketName, accessKey, secretKey); err != nil {
 			return nil, fmt.Errorf("Fail to get location of bucket %q: %s", bucketName, err)
 		}

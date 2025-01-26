@@ -77,7 +77,7 @@ func TestFileSystem(t *testing.T) {
 	if e := fs.Access(ctx, "/", 7); e != 0 {
 		t.Fatalf("access /: %s", e)
 	}
-	f, err := fs.Create(ctx, "/hello", 0644)
+	f, err := fs.Create(ctx, "/hello", 0666, 022)
 	if err != 0 {
 		t.Fatalf("create /hello: %s", err)
 	}
@@ -85,7 +85,7 @@ func TestFileSystem(t *testing.T) {
 		t.Fatalf("name: %s", f.Name())
 	}
 	_ = f.Close(ctx)
-	f, err = fs.Open(ctx, "/hello", mMaskR|mMaskW)
+	f, err = fs.Open(ctx, "/hello", meta.MODE_MASK_R|meta.MODE_MASK_W)
 	if err != 0 {
 		t.Fatalf("open %s", err)
 	}
@@ -180,11 +180,11 @@ func TestFileSystem(t *testing.T) {
 		t.Fatalf("delete /sym: %s", err)
 	}
 
-	if _, e := fs.Open(meta.NewContext(2, 2, []uint32{3}), "/hello", mMaskW); e == 0 || e != syscall.EACCES {
+	if _, e := fs.Open(meta.NewContext(2, 2, []uint32{3}), "/hello", meta.MODE_MASK_W); e == 0 || e != syscall.EACCES {
 		t.Fatalf("open without permission: %s", e)
 	}
 
-	if err := fs.Mkdir(ctx, "/d", 0755); err != 0 {
+	if err := fs.Mkdir(ctx, "/d", 0777, 022); err != 0 {
 		t.Fatalf("mkdir /d: %s", err)
 	}
 	d, e := fs.Open(ctx, "/", 0)
@@ -230,7 +230,7 @@ func TestFileSystem(t *testing.T) {
 	if err := fs.Delete(ctx, "/d/f"); err == 0 || !IsNotExist(err) {
 		t.Fatalf("delete /d/f: %s", err)
 	}
-	if e := fs.Rmr(ctx, "/d"); e != 0 {
+	if e := fs.Rmr(ctx, "/d", meta.RmrDefaultThreads); e != 0 {
 		t.Fatalf("delete /d -r: %s", e)
 	}
 
@@ -246,13 +246,13 @@ func TestFileSystem(t *testing.T) {
 	}
 
 	// path with trailing /
-	if err := fs.Mkdir(ctx, "/ddd/", 0777); err != 0 {
+	if err := fs.Mkdir(ctx, "/ddd/", 0777, 000); err != 0 {
 		t.Fatalf("mkdir /ddd/: %s", err)
 	}
-	if _, err := fs.Create(ctx, "/ddd/ddd", 0777); err != 0 {
+	if _, err := fs.Create(ctx, "/ddd/ddd", 0777, 000); err != 0 {
 		t.Fatalf("create /ddd/ddd: %s", err)
 	}
-	if _, err := fs.Create(ctx, "/ddd/fff/", 0777); err != syscall.EINVAL {
+	if _, err := fs.Create(ctx, "/ddd/fff/", 0777, 000); err != syscall.EINVAL {
 		t.Fatalf("create /ddd/fff/: %s", err)
 	}
 	if err := fs.Delete(ctx, "/ddd/"); err != syscall.ENOTEMPTY {
@@ -261,7 +261,7 @@ func TestFileSystem(t *testing.T) {
 	if err := fs.Rename(ctx, "/ddd/", "/ttt/", 0); err != 0 {
 		t.Fatalf("delete /ddd/: %s", err)
 	}
-	if err := fs.Rmr(ctx, "/ttt/"); err != 0 {
+	if err := fs.Rmr(ctx, "/ttt/", meta.RmrDefaultThreads); err != 0 {
 		t.Fatalf("rmr /ttt/: %s", err)
 	}
 	if _, err := fs.Stat(ctx, "/ttt/"); err != syscall.ENOENT {
@@ -275,6 +275,7 @@ func createTestFS(t *testing.T) *FileSystem {
 		Name:      "test",
 		BlockSize: 4096,
 		Capacity:  1 << 30,
+		DirStats:  true,
 	}
 	_ = m.Init(format, true)
 	var conf = vfs.Config{

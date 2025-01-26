@@ -21,9 +21,10 @@ package meta
 
 import (
 	"bytes"
+	"context"
 	"time"
 
-	badger "github.com/dgraph-io/badger/v3"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/juicedata/juicefs/pkg/utils"
 )
 
@@ -57,10 +58,7 @@ func (tx *badgerTxn) gets(keys ...[]byte) [][]byte {
 
 func (tx *badgerTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
 	var prefix bool
-	var options = badger.IteratorOptions{
-		PrefetchValues: !keysOnly,
-		PrefetchSize:   1024,
-	}
+	var options = badger.IteratorOptions{}
 	if bytes.Equal(nextKey(begin), end) {
 		prefix = true
 		options.Prefix = begin
@@ -112,10 +110,9 @@ func (tx *badgerTxn) set(key, value []byte) {
 	}
 }
 
-func (tx *badgerTxn) append(key []byte, value []byte) []byte {
+func (tx *badgerTxn) append(key []byte, value []byte) {
 	list := append(tx.get(key), value...)
 	tx.set(key, list)
-	return list
 }
 
 func (tx *badgerTxn) incrBy(key []byte, value int64) int64 {
@@ -147,7 +144,11 @@ func (c *badgerClient) shouldRetry(err error) bool {
 	return err == badger.ErrConflict
 }
 
-func (c *badgerClient) txn(f func(*kvTxn) error, retry int) (err error) {
+func (c *badgerClient) config(key string) interface{} {
+	return nil
+}
+
+func (c *badgerClient) txn(ctx context.Context, f func(*kvTxn) error, retry int) (err error) {
 	t := c.client.NewTransaction(true)
 	defer t.Discard()
 	defer func() {
@@ -207,6 +208,7 @@ func (c *badgerClient) gc() {}
 func newBadgerClient(addr string) (tkvClient, error) {
 	opt := badger.DefaultOptions(addr)
 	opt.Logger = utils.GetLogger("badger")
+	opt.MetricsEnabled = false
 	client, err := badger.Open(opt)
 	if err != nil {
 		return nil, err

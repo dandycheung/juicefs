@@ -49,7 +49,9 @@ func (s *scsClient) String() string {
 func (s *scsClient) Limits() Limits {
 	return Limits{
 		IsSupportMultipartUpload: true,
-		IsSupportUploadPartCopy:  false,
+		MinPartSize:              5 << 20,
+		MaxPartSize:              5 << 30, // guess
+		MaxPartCount:             2048,
 	}
 }
 
@@ -76,7 +78,7 @@ func (s *scsClient) Head(key string) (Object, error) {
 	return &obj{key: key, size: om.ContentLength, mtime: mtime, isDir: strings.HasSuffix(key, "/")}, nil
 }
 
-func (s *scsClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (s *scsClient) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	if off > 0 || limit > 0 {
 		var r string
 		if limit > 0 {
@@ -89,26 +91,26 @@ func (s *scsClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return s.b.Get(key, "")
 }
 
-func (s *scsClient) Put(key string, in io.Reader) error {
+func (s *scsClient) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	return s.b.Put(key, map[string]string{}, in)
 }
 
-func (s *scsClient) Delete(key string) error {
+func (s *scsClient) Delete(key string, getters ...AttrGetter) error {
 	return s.b.Delete(key)
 }
 
-func (s *scsClient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (s *scsClient) List(prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if marker != "" {
 		if s.marker == "" {
 			// last page
-			return nil, nil
+			return nil, false, "", nil
 		}
 		marker = s.marker
 	}
 	list, err := s.b.List(delimiter, prefix, marker, limit)
 	if err != nil {
 		s.marker = ""
-		return nil, err
+		return nil, false, "", err
 	}
 	s.marker = list.NextMarker
 	n := len(list.Contents)
@@ -133,11 +135,7 @@ func (s *scsClient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
-}
-
-func (s *scsClient) ListAll(prefix, marker string) (<-chan Object, error) {
-	return nil, notSupported
+	return generateListResult(objs, limit)
 }
 
 func (s *scsClient) CreateMultipartUpload(key string) (*MultipartUpload, error) {

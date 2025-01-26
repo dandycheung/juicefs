@@ -1,6 +1,6 @@
 ---
 title: 在 Hadoop 生态使用 JuiceFS
-sidebar_position: 5
+sidebar_position: 3
 slug: /hadoop_java_sdk
 ---
 
@@ -23,7 +23,7 @@ JuiceFS 默认使用本地的「用户／UID」及「用户组／GID」映射，
 
 通过 JuiceFS Java 客户端为 Hadoop 生态提供存储，需要提前创建 JuiceFS 文件系统。部署 Java 客户端时，在配置文件中指定已创建文件系统的元数据引擎地址。
 
-创建文件系统可以参考 [JuiceFS 快速上手指南](../getting-started/README.md)。
+创建文件系统可以参考 [JuiceFS 快速上手指南](../getting-started/installation.md)。
 
 :::note 注意
 如果要在分布式环境中使用 JuiceFS，创建文件系统时，请合理规划要使用的对象存储和数据库，确保它们可以被每个集群节点正常访问。
@@ -47,7 +47,7 @@ JuiceFS Hadoop Java SDK 默认使用 JDK 8 编译，如果需要在高版本的 
 
 ### 安装预编译客户端
 
-请参考[「安装」](../getting-started/installation.md#安装预编译客户端)文档了解如何下载预编译的 JuiceFS Hadoop Java SDK。
+请参考[「安装」](../getting-started/installation.md#install-the-pre-compiled-client)文档了解如何下载预编译的 JuiceFS Hadoop Java SDK。
 
 ### 手动编译客户端
 
@@ -204,13 +204,16 @@ make win
 | `juicefs.push-auth`       |              | [Prometheus 基本认证](https://prometheus.io/docs/guides/basic-auth)信息，格式为 `<username>:<password>`。              |
 | `juicefs.push-graphite`   |              | [Graphite](https://graphiteapp.org) 地址，格式为 `<host>:<port>`。                                                 |
 | `juicefs.push-interval`   | 10           | 指标推送的时间间隔，单位为秒。                                                                                             |
+| `juicefs.push-labels`     |              | 指标额外标签，格式为 `key1:value1;key2:value2`。                                                                       |
 | `juicefs.fast-resolve`    | `true`       | 是否开启快速元数据查找（通过 Redis Lua 脚本实现）                                                                              |
 | `juicefs.no-usage-report` | `false`      | 是否上报数据。仅上版本号等使用量数据，不包含任何用户信息。                                                                               |
 | `juicefs.block.size`      | `134217728`  | 单位为字节，同 HDFS 的 `dfs.blocksize`，默认 128 MB                                                                    |
 | `juicefs.file.checksum`   | `false`      | DistCp 使用 `-update` 参数时，是否计算文件 Checksum                                                                     |
 | `juicefs.no-bgjob`        | `false`      | 是否关闭后台任务（清理、备份等）                                                                                            |
 | `juicefs.backup-meta`     | 3600         | 自动将 JuiceFS 元数据备份到对象存储间隔（单位：秒），设置为 0 关闭自动备份                                                                 |
+|`juicefs.backup-skip-trash`| `false`      | 备份元数据时忽略回收站中的文件和目录。                                                                                         |
 | `juicefs.heartbeat`       | 12           | 客户端和元数据引擎之间的心跳间隔（单位：秒），建议所有客户端都设置一样                                                                         |
+| `juicefs.skip-dir-mtime`  | 100ms        | 修改父目录 mtime 间隔。                                                                                             |
 
 #### 多文件系统配置
 
@@ -862,6 +865,54 @@ JuiceFS 可以使用本地磁盘作为缓存加速数据访问，以下数据是
 | q10     | 24              | 28             | 38   |
 
 ![parquet](../images/spark_sql_parquet.png)
+
+## 使用 Apache Ranger 进行权限管控
+
+JuiceFS 当前支持对接 Apache Ranger 的 `HDFS` 模块进行路径的权限管控。
+
+### 1. 相关配置
+
+| 配置项                               | 默认值      | 描述                                                                                                                             |
+|-----------------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------|
+| `juicefs.ranger-rest-url`         |          | `ranger`连接地址。不配置该参数即不使用该功能。                                                                                                    |
+| `juicefs.ranger-service-name`     |          | `ranger`中配置的`service name`，必填                                                                                                  |
+| `juicefs.ranger-poll-interval-ms` | `30000`  | `ranger`缓存刷新周期，默认30s                                                                                                           |
+
+### 2. 环境及依赖
+
+考虑到鉴权环境的复杂性，以及依赖冲突的可能性，Ranger 鉴权相关 JAR 包（例如`ranger-plugins-common-2.3.0.jar`,`ranger-plugins-audit-2.3.0.jar`等）及其依赖并未打进 JuiceFS 的 SDK 中。
+
+使用中如果遇到`ClassNotFound`报错，建议单独引入相关目录中（例如`$SPARK_HOME/jars`）
+
+可能需要单独添加的依赖：
+
+```shell
+ranger-plugins-common-2.3.0.jar
+ranger-plugins-audit-2.3.0.jar
+gethostname4j-1.0.0.jar
+jackson-jaxrs-1.9.13.jar
+jersey-client-1.19.jar
+jersey-core-1.19.jar
+jna-5.7.0.jar
+```
+
+### 3. 使用提示
+
+#### 3.1 Ranger版本
+
+当前代码测试基于`Ranger2.3`和`Ranger2.4`版本，因除`HDFS`模块鉴权外并未使用其他特性，理论上其他版本均适用。
+
+#### 3.2 Ranger Audit
+
+当前仅支持鉴权功能，`Ranger Audit`功能已关闭。
+
+#### 3.3 Ranger其他参数
+
+为提升使用效率，当前仅开放连接 Ranger 最核心的参数。
+
+#### 3.4 安全性问题
+
+因项目代码完全开源，无法避免用户通过替换`juicefs.ranger.rest-url`等参数的方式扰乱安全管控。如需更严格的管控，建议自主编译代码，通过将相关安全参数进行加密处理等方式解决。
 
 ## FAQ
 

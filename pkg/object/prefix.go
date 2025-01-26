@@ -33,10 +33,11 @@ func WithPrefix(os ObjectStorage, prefix string) ObjectStorage {
 	return &withPrefix{os, prefix}
 }
 
-func (s *withPrefix) SetStorageClass(sc string) {
+func (s *withPrefix) SetStorageClass(sc string) error {
 	if o, ok := s.os.(SupportStorageClass); ok {
-		o.SetStorageClass(sc)
+		return o.SetStorageClass(sc)
 	}
+	return notSupported
 }
 
 func (s *withPrefix) Symlink(oldName, newName string) error {
@@ -106,41 +107,41 @@ func (p *withPrefix) Head(key string) (Object, error) {
 	return p.updateKey(o), nil
 }
 
-func (p *withPrefix) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (p *withPrefix) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	if off > 0 && limit < 0 {
 		return nil, fmt.Errorf("invalid range: %d-%d", off, limit)
 	}
-	return p.os.Get(p.prefix+key, off, limit)
+	return p.os.Get(p.prefix+key, off, limit, getters...)
 }
 
-func (p *withPrefix) Put(key string, in io.Reader) error {
-	return p.os.Put(p.prefix+key, in)
+func (p *withPrefix) Put(key string, in io.Reader, getters ...AttrGetter) error {
+	return p.os.Put(p.prefix+key, in, getters...)
 }
 
 func (p *withPrefix) Copy(dst, src string) error {
 	return p.os.Copy(dst, src)
 }
 
-func (p *withPrefix) Delete(key string) error {
-	return p.os.Delete(p.prefix + key)
+func (p *withPrefix) Delete(key string, getters ...AttrGetter) error {
+	return p.os.Delete(p.prefix+key, getters...)
 }
 
-func (p *withPrefix) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
-	if marker != "" {
-		marker = p.prefix + marker
+func (p *withPrefix) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
+	if start != "" {
+		start = p.prefix + start
 	}
-	objs, err := p.os.List(p.prefix+prefix, marker, delimiter, limit)
+	objs, hasMore, nextMarker, err := p.os.List(p.prefix+prefix, start, token, delimiter, limit, followLink)
 	for i, o := range objs {
 		objs[i] = p.updateKey(o)
 	}
-	return objs, err
+	return objs, hasMore, nextMarker, err
 }
 
-func (p *withPrefix) ListAll(prefix, marker string) (<-chan Object, error) {
+func (p *withPrefix) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	if marker != "" {
 		marker = p.prefix + marker
 	}
-	r, err := p.os.ListAll(p.prefix+prefix, marker)
+	r, err := p.os.ListAll(p.prefix+prefix, marker, followLink)
 	if err != nil {
 		return r, err
 	}
@@ -207,3 +208,11 @@ func (p *withPrefix) ListUploads(marker string) ([]*PendingPart, string, error) 
 }
 
 var _ ObjectStorage = &withPrefix{}
+
+func IsFileSystem(object ObjectStorage) bool {
+	if o, ok := object.(*withPrefix); ok {
+		object = o.os
+	}
+	_, ok := object.(FileSystem)
+	return ok
+}

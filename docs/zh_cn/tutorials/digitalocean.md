@@ -1,6 +1,6 @@
 ---
 title: 在 DigitalOcean 使用 JuiceFS
-sidebar_position: 7
+sidebar_position: 6
 slug: /clouds/digitalocean
 ---
 
@@ -44,7 +44,7 @@ JuiceFS 使用对象存储来存储所有的数据，在 DigitalOcean 上使用 
 
 本文我们使用 DigitalOcean 的 Redis 6 数据库托管服务，区域选择 `新加坡`，选择与已存在的 Droplet 相同的 VPC 私有网络。创建 Redis 大概需要 5 分钟左右的时间，我们跟随设置向导对数据库进行初始化设置。
 
-![](../images/digitalocean-redis-guide.png)
+![DigitalOcean-Redis-guide](../images/digitalocean-redis-guide.png)
 
 默认情况下 Redis 允许所有入站连接，出于安全考虑，应该在设置向导的安全设置环节，在 `Add trusted sources` 中选中有权访问 Redis 的 Droplet，即仅允许选中的主机访问 Redis。
 
@@ -54,36 +54,16 @@ JuiceFS 使用对象存储来存储所有的数据，在 DigitalOcean 上使用 
 
 Redis 的访问地址可以从控制台的 `Connection Details` 中找到，如果所有计算资源都在 DigitalOcean，则建议优先使用 VPC 私有网络进行连接，这样能最大程度的提升安全性。
 
-![](../images/digitalocean-redis-url.png)
+![DigitalOcean-Redis-url](../images/digitalocean-redis-url.png)
 
 ## 安装和使用
 
 ### 1. 安装 JuiceFS 客户端
 
-我们当前使用的是 Ubuntu Server 20.04，依次执行以下命令即可安装最新版本客户端。
-
-检测当前系统信息并设置临时的环境变量：
+我们当前使用的是 Ubuntu Server 20.04，执行以下命令即可安装最新版本客户端。
 
 ```shell
-JFS_LATEST_TAG=$(curl -s https://api.github.com/repos/juicedata/juicefs/releases/latest | grep 'tag_name' | cut -d '"' -f 4 | tr -d 'v')
-```
-
-下载适配当前系统的最新版客户端软件包：
-
-```shell
-wget "https://github.com/juicedata/juicefs/releases/download/v${JFS_LATEST_TAG}/juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz"
-```
-
-解压安装包：
-
-```shell
-mkdir juice && tar -zxvf "juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz" -C juice
-```
-
-将客户端安装到 `/usr/local/bin` ：
-
-```shell
-sudo install juice/juicefs /usr/local/bin
+curl -sSL https://d.juicefs.com/install | sh -
 ```
 
 执行命令，看到返回 `juicefs` 的命令帮助信息，代表客户端安装成功。
@@ -155,7 +135,7 @@ $ juicefs format \
 
 **参数说明：**
 
-- `--storage`：指定数据存储引擎，这里使用的是 `space`，点此查看所有[支持的存储](../guide/how_to_set_up_object_storage.md)。
+- `--storage`：指定数据存储引擎，这里使用的是 `space`，点此查看所有[支持的存储](../reference/how_to_set_up_object_storage.md)。
 - `--bucket`：指定存储桶访问地址。
 - `--access-key` 和 `--secret-key`：指定访问对象存储 API 的秘钥。
 - DigitalOcean 托管的 Redis 需要使用 TLS/SSL 加密访问，因此需要使用 `rediss://` 协议头，链接最后添加的 `/1` 代表使用 Redis 的 1 号数据库。
@@ -266,21 +246,7 @@ sudo juicefs umount ~/mnt
 
 ### 6. 开机自动挂载
 
-如果你不想每次重启系统都要重新手动挂载 JuiceFS，可以设置自动挂载。
-
-首先，需要将  `juicefs` 客户端重命名为 `mount.juicefs` 并复制到 `/sbin/` 目录：
-
-```shell
-sudo cp /usr/local/bin/juicefs /sbin/mount.juicefs
-```
-
-编辑 `/etc/fstab` 配置文件，新增一条记录：
-
-```shell
-rediss://default:bn8l7ui2cun4iaji@private-db-redis-sgp1-03138-do-user-2500071-0.b.db.ondigitalocean.com:25061/1    /home/herald/mnt       juicefs     _netdev,cache-size=20480     0  0
-```
-
-挂载选项中 `cache-size=20480` 代表分配 20GiB 本地磁盘空间作为 JuiceFS 的本地缓存，请根据实际的硬件配置决定分配的缓存大小。你可以根据需要调整上述配置中的 [FUSE 挂载选项](../reference/fuse_mount_options.md)。
+请参考[「启动时自动挂载 JuiceFS」](../administration/mount_at_boot.md)
 
 ### 7. 多主机共享挂载
 

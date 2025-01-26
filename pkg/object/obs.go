@@ -75,7 +75,13 @@ func (s *obsClient) Create() error {
 	}
 	return err
 }
-
+func getStorageClassStr(sc obs.StorageClassType) string {
+	if sc == "" {
+		return string(obs.StorageClassStandard)
+	} else {
+		return string(sc)
+	}
+}
 func (s *obsClient) Head(key string) (Object, error) {
 	params := &obs.GetObjectMetadataInput{
 		Bucket: s.bucket,
@@ -88,16 +94,17 @@ func (s *obsClient) Head(key string) (Object, error) {
 		}
 		return nil, err
 	}
+
 	return &obj{
 		key,
 		r.ContentLength,
 		r.LastModified,
 		strings.HasSuffix(key, "/"),
-		string(r.StorageClass),
+		getStorageClassStr(r.StorageClass),
 	}, nil
 }
 
-func (s *obsClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (s *obsClient) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	params := &obs.GetObjectInput{}
 	params.Bucket = s.bucket
 	params.Key = key
@@ -109,6 +116,10 @@ func (s *obsClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	} else {
 		resp, err = s.c.GetObject(params)
 	}
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.RequestId).SetStorageClass(getStorageClassStr(resp.StorageClass))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +130,7 @@ func (s *obsClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
-func (s *obsClient) Put(key string, in io.Reader) error {
+func (s *obsClient) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	var body io.ReadSeeker
 	var vlen int64
 	var sum []byte
@@ -161,6 +172,10 @@ func (s *obsClient) Put(key string, in io.Reader) error {
 	if err == nil && s.checkEtag && strings.Trim(resp.ETag, "\"") != obs.Hex(sum) {
 		err = fmt.Errorf("unexpected ETag: %s != %s", strings.Trim(resp.ETag, "\""), obs.Hex(sum))
 	}
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.RequestId).SetStorageClass(getStorageClassStr(resp.StorageClass))
+	}
 	return err
 }
 
@@ -175,18 +190,22 @@ func (s *obsClient) Copy(dst, src string) error {
 	return err
 }
 
-func (s *obsClient) Delete(key string) error {
+func (s *obsClient) Delete(key string, getters ...AttrGetter) error {
 	params := obs.DeleteObjectInput{}
 	params.Bucket = s.bucket
 	params.Key = key
-	_, err := s.c.DeleteObject(&params)
+	resp, err := s.c.DeleteObject(&params)
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.RequestId)
+	}
 	return err
 }
 
-func (s *obsClient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (s *obsClient) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	input := &obs.ListObjectsInput{
 		Bucket: s.bucket,
-		Marker: marker,
+		Marker: start,
 	}
 	input.Prefix = prefix
 	input.MaxKeys = int(limit)
@@ -194,32 +213,29 @@ func (s *obsClient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 	input.EncodingType = "url"
 	resp, err := s.c.ListObjects(input)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(resp.Contents)
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
+		// Obs SDK listObjects method already decodes the object key.
 		o := resp.Contents[i]
-		key, err := obs.UrlDecode(o.Key)
-		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to decode key %s", o.Key)
-		}
-		objs[i] = &obj{key, o.Size, o.LastModified, strings.HasSuffix(key, "/"), string(o.StorageClass)}
+		objs[i] = &obj{o.Key, o.Size, o.LastModified, strings.HasSuffix(o.Key, "/"), string(o.StorageClass)}
 	}
 	if delimiter != "" {
 		for _, p := range resp.CommonPrefixes {
 			prefix, err := obs.UrlDecode(p)
 			if err != nil {
-				return nil, errors.WithMessagef(err, "failed to decode commonPrefixes %s", p)
+				return nil, false, "", errors.WithMessagef(err, "failed to decode commonPrefixes %s", p)
 			}
 			objs = append(objs, &obj{prefix, 0, time.Unix(0, 0), true, ""})
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	return objs, resp.IsTruncated, resp.NextMarker, nil
 }
 
-func (s *obsClient) ListAll(prefix, marker string) (<-chan Object, error) {
+func (s *obsClient) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	return nil, notSupported
 }
 
@@ -313,8 +329,9 @@ func (s *obsClient) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, nextMarker, nil
 }
 
-func (s *obsClient) SetStorageClass(sc string) {
+func (s *obsClient) SetStorageClass(sc string) error {
 	s.sc = sc
+	return nil
 }
 
 func autoOBSEndpoint(bucketName, accessKey, secretKey, token string) (string, error) {

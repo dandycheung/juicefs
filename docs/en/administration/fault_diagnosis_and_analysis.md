@@ -16,7 +16,7 @@ Different JuiceFS clients print logs in different ways, which are described as f
 
 ### Mount point
 
-When a JuiceFS file system is mounted with the [`-d` option](../reference/command_reference.md#mount) (indicating running in the background), it will print logs to the system log file and local log file simultaneously. Depending on which user is running when mounting the file system, the paths of the local log files are slightly different. For root, the local log file locates at `/var/log/juicefs.log`, while it locates at `$HOME/.juicefs/juicefs.log` for non-root users. Please refer to [`--log` option](../reference/command_reference.md#mount) for details.
+When a JuiceFS file system is mounted with the [`-d` option](../reference/command_reference.mdx#mount) (indicating running in the background), it will print logs to the system log file and local log file simultaneously. Depending on which user is running when mounting the file system, the paths of the local log files are slightly different. For root, the local log file locates at `/var/log/juicefs.log`, while it locates at `$HOME/.juicefs/juicefs.log` for non-root users. Please refer to [`--log` option](../reference/command_reference.mdx#mount) for details.
 
 Depending on the operating system, there are different commands to retrieve system logs or read local log files directly.
 
@@ -118,11 +118,56 @@ kubectl -n kube-system exec juicefs-chaos-k8s-002-pvc-d4b8fb4f-2c0b-48e8-a2dc-53
 
 ### S3 Gateway
 
-You need to add the [`--access-log` option](../reference/command_reference.md#juicefs-gateway) when starting the S3 gateway to specify the path to output the access log. By default, the S3 gateway does not output the access log.
+You need to add the [`--access-log` option](../reference/command_reference.mdx#gateway) when starting the S3 gateway to specify the path to output the access log. By default, the S3 gateway does not output the access log.
 
 ### Hadoop Java SDK
 
 You need to add the `juicefs.access-log` configuration item in the [client configurations](../deployment/hadoop_java_sdk.md#other-configurations) of the JuiceFS Hadoop Java SDK to specify the path of the access log output, and the access log is not output by default.
+
+## Collect Various Information Using the `debug` Subcommand {#debug}
+
+The `juicefs debug` subcommand can help you automatically collect various information about a specified mount point, facilitating troubleshooting and diagnosis.
+
+```shell
+juicefs debug <mountpoint>
+```
+
+This command collects the following information:
+
+1. JuiceFS version
+2. Operating system version and kernel version
+3. Contents of the JuiceFS `.config` internal file
+4. Contents of the `.stat` internal file in JuiceFS and recorded again after 5 seconds
+5. Command-line parameters used for mounting
+6. Go pprof information
+7. JuiceFS logs (defaulting to the last 5000 lines)
+
+By default, a `debug` directory is created in the current directory, and the collected information is saved in that directory. Here's an example:
+
+```shell
+$ juicefs debug /tmp/mountpoint
+
+$ tree ./debug
+./debug
+├── tmp-test1-20230609104324
+│   ├── config.txt
+│   ├── juicefs.log
+│   ├── pprof
+│   │   ├── juicefs.allocs.pb.gz
+│   │   ├── juicefs.block.pb.gz
+│   │   ├── juicefs.cmdline.txt
+│   │   ├── juicefs.goroutine.pb.gz
+│   │   ├── juicefs.goroutine.stack.txt
+│   │   ├── juicefs.heap.pb.gz
+│   │   ├── juicefs.mutex.pb.gz
+│   │   ├── juicefs.profile.30s.pb.gz
+│   │   ├── juicefs.threadcreate.pb.gz
+│   │   └── juicefs.trace.5s.pb.gz
+│   ├── stats.5s.txt
+│   ├── stats.txt
+│   └── system-info.log
+└── tmp-test1-20230609104324.zip
+```
 
 ## Real-time performance monitoring {#performance-monitor}
 
@@ -130,9 +175,9 @@ JuiceFS provides the `profile` and `stats` subcommands to visualize real-time pe
 
 ### `juicefs profile` {#profile}
 
-[`juicefs profile`](../reference/command_reference.md#profile) will collect data from [file system access log](#access-log), run the `juicefs profile MOUNTPOINT` command, you can see the real-time statistics of each file system operation based on the latest access log:
+[`juicefs profile`](../reference/command_reference.mdx#profile) will collect data from [file system access log](#access-log), run the `juicefs profile MOUNTPOINT` command, you can see the real-time statistics of each file system operation based on the latest access log:
 
-![](../images/juicefs-profiling.gif)
+![JuiceFS-profiling](../images/juicefs-profiling.gif)
 
 Apart from real-time mode, this command also provides a play-back mode, which performs the same visualization on existing access log files:
 
@@ -154,9 +199,9 @@ juicefs profile /tmp/juicefs.accesslog --uid 12345
 
 ### `juicefs stats` {#stats}
 
-The [`juicefs stats`](../reference/command_reference.md#stats) command reads JuiceFS Client internal metrics data, and output performance data in a format similar to `dstat`:
+The [`juicefs stats`](../reference/command_reference.mdx#stats) command reads JuiceFS Client internal metrics data, and output performance data in a format similar to `dstat`:
 
-![](../images/juicefs_stats_watcher.png)
+![juicefs_stats_watcher](../images/juicefs_stats_watcher.png)
 
 Metrics description:
 
@@ -164,7 +209,7 @@ Metrics description:
 
 - `cpu`: CPU usage of the process.
 - `mem`: Physical memory used by the process.
-- `buf`: Current [buffer size](../guide/cache_management.md#buffer-size), if this value is constantly close to (or even exceeds) the configured [`--buffer-size`](../reference/command_reference.md#mount), you should increase buffer size or decrease application workload.
+- `buf`: Current [buffer size](../guide/cache.md#buffer-size), if this value is constantly close to (or even exceeds) the configured [`--buffer-size`](../reference/command_reference.mdx#mount-data-cache-options), you should increase buffer size or decrease application workload.
 - `cache`: Internal metric, ignore this.
 
 #### `fuse`
@@ -194,25 +239,15 @@ The `object` stands for object storage related metrics, when cache is enabled, p
 
 ## Get runtime information using pprof {#runtime-information}
 
-By default, JuiceFS clients will listen to a TCP port locally via [pprof](https://pkg.go.dev/net/http/pprof) to get runtime information such as Goroutine stack information, CPU performance statistics, memory allocation statistics. You can see the specific port number that the current JuiceFS client is listening on by using the system command (e.g. `lsof`):
-
-:::tip
-If you mount JuiceFS as the root user, you need to add `sudo` before the `lsof` command.
-:::
+By default, JuiceFS clients will listen to a TCP port locally via [pprof](https://pkg.go.dev/net/http/pprof) to get runtime information such as Goroutine stack information, CPU performance statistics, memory allocation statistics. You can view the specific port number that the current JuiceFS client is listening to through the `.config` file under the mount point:
 
 ```bash
-lsof -i -nP | grep LISTEN | grep juicefs
+# Assume the mount point is /jfs
+$ cat /jfs/.config | grep 'DebugAgent'
+  "DebugAgent": "127.0.0.1:6064",
 ```
 
-```shell
-# pprof listen prot
-juicefs   19371 user    6u  IPv4 0xa2f1748ad05b5427      0t0  TCP 127.0.0.1:6061 (LISTEN)
-
-# Prometheus API listen port
-juicefs   19371 user   11u  IPv4 0xa2f1748ad05cbde7      0t0  TCP 127.0.0.1:9567 (LISTEN)
-```
-
-By default, pprof listens on port numbers ranging from 6060 to 6099. That's why the actual port number in the above example is 6061. Once you get the listening port number, you can view all the available runtime information by accessing `http://localhost:<port>/debug/pprof`, and some important runtime information will be shown as follows:
+The default port number range that pprof listens to starts from 6060 and ends at 6099. From the above example, you can see that the actual port number is 6064. Once you get the listening port number, you can view all the available runtime information by accessing `http://localhost:<port>/debug/pprof`, and some important runtime information will be shown as follows:
 
 - Goroutine stack information: `http://localhost:<port>/debug/pprof/goroutine?debug=1`
 - CPU performance statistics: `http://localhost:<port>/debug/pprof/profile?seconds=30`
@@ -239,7 +274,7 @@ You can also use the `juicefs debug` command to automatically collect these runt
 juicefs debug /mnt/jfs
 ```
 
-For more information about the `juicefs debug` command, see [command reference](../reference/command_reference.md#debug).
+For more information about the `juicefs debug` command, see [command reference](../reference/command_reference.mdx#debug).
 :::
 
 If you have the `go` command installed, you can analyze it directly with the `go tool pprof` command. For example to analyze CPU performance statistics:

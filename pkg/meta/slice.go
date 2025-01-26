@@ -157,9 +157,21 @@ func buildSlice(ss []*slice) []Slice {
 func compactChunk(ss []*slice) (uint32, uint32, []Slice) {
 	var chunk = buildSlice(ss)
 	var pos uint32
-	if len(chunk) > 0 && chunk[0].Id == 0 {
-		pos = chunk[0].Len
-		chunk = chunk[1:]
+	n := len(chunk)
+	for n > 1 {
+		if chunk[0].Id == 0 {
+			pos += chunk[0].Len
+			chunk = chunk[1:]
+			n--
+		} else if chunk[n-1].Id == 0 {
+			chunk = chunk[:n-1]
+			n--
+		} else {
+			break
+		}
+	}
+	if n == 1 && chunk[0].Id == 0 {
+		chunk[0].Len = 1
 	}
 	var size uint32
 	for _, c := range chunk {
@@ -171,6 +183,7 @@ func compactChunk(ss []*slice) (uint32, uint32, []Slice) {
 func skipSome(chunk []*slice) int {
 	var skipped int
 	var total = len(chunk)
+OUT:
 	for skipped < total {
 		ss := chunk[skipped:]
 		pos, size, c := compactChunk(ss)
@@ -185,6 +198,11 @@ func skipSome(chunk []*slice) int {
 		if !isFirst(pos, c[0]) {
 			// it's not the first slice, compact it
 			break
+		}
+		for _, s := range ss[1:] {
+			if *s == *first {
+				break OUT
+			}
 		}
 		skipped++
 	}

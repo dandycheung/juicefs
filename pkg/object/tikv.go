@@ -45,7 +45,7 @@ func (t *tikv) String() string {
 	return fmt.Sprintf("tikv://%s/", t.addr)
 }
 
-func (t *tikv) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (t *tikv) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	d, err := t.c.Get(context.TODO(), []byte(key))
 	if len(d) == 0 {
 		err = os.ErrNotExist
@@ -63,7 +63,7 @@ func (t *tikv) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewBuffer(data)), nil
 }
 
-func (t *tikv) Put(key string, in io.Reader) error {
+func (t *tikv) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	d, err := io.ReadAll(in)
 	if err != nil {
 		return err
@@ -85,13 +85,13 @@ func (t *tikv) Head(key string) (Object, error) {
 	}, err
 }
 
-func (t *tikv) Delete(key string) error {
+func (t *tikv) Delete(key string, getters ...AttrGetter) error {
 	return t.c.Delete(context.TODO(), []byte(key))
 }
 
-func (t *tikv) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (t *tikv) List(prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if delimiter != "" {
-		return nil, notSupportedDelimiter
+		return nil, false, "", notSupported
 	}
 	if marker == "" {
 		marker = prefix
@@ -102,7 +102,7 @@ func (t *tikv) List(prefix, marker, delimiter string, limit int64) ([]Object, er
 	// TODO: key only
 	keys, vs, err := t.c.Scan(context.TODO(), []byte(marker), nil, int(limit))
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	var objs = make([]Object, len(keys))
 	mtime := time.Now()
@@ -110,7 +110,7 @@ func (t *tikv) List(prefix, marker, delimiter string, limit int64) ([]Object, er
 		// FIXME: mtime
 		objs[i] = &obj{string(k), int64(len(vs[i])), mtime, strings.HasSuffix(string(k), "/"), ""}
 	}
-	return objs, nil
+	return generateListResult(objs, limit)
 }
 
 func newTiKV(endpoint, accesskey, secretkey, token string) (ObjectStorage, error) {

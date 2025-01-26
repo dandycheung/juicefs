@@ -1,6 +1,6 @@
 ---
 title: Use JuiceFS on Tencent Cloud
-sidebar_position: 7
+sidebar_position: 8
 slug: /clouds/qcloud
 ---
 
@@ -77,27 +77,13 @@ Tencent Cloud COS needs to be accessed through API, you need to prepare the acce
 
 ## Installation
 
-Here we are using Ubuntu Server 20.04 64-bit system, and the latest version of the client can be downloaded by running the following commands. You can also choose another version by visiting the [JuiceFS GitHub Releases](https://github.com/juicedata/juicefs/releases) page.
+Here we are using Ubuntu Server 20.04 64-bit system, and the latest version of the client can be installed by running the following command.
 
 ```shell
-JFS_LATEST_TAG=$(curl -s https://api.github.com/repos/juicedata/juicefs/releases/latest | grep 'tag_name' | cut -d '"' -f 4 | tr -d 'v')
+curl -sSL https://d.juicefs.com/install | sh -
 ```
 
-```shell
-wget "https://github.com/juicedata/juicefs/releases/download/v${JFS_LATEST_TAG}/juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz"
-```
-
-After downloading, unzip the program into the `juice` folder.
-
-```shell
-mkdir juice && tar -zxvf "juicefs-${JFS_LATEST_TAG}-linux-amd64.tar.gz" -C juice
-```
-
-Install the JuiceFS client to `/usr/local/bin` :
-
-```shell
-sudo install juice/juicefs /usr/local/bin
-```
+You can also choose another version by visiting the [JuiceFS GitHub Releases](https://github.com/juicedata/juicefs/releases) page.
 
 Execute the command and see the help message `juicefs` returned, which means the client installation is successful.
 
@@ -270,24 +256,6 @@ sudo juicefs umount /mnt/jfs
 
 > **Note**: Forced unmount of the file system in use may result in data corruption or loss, so please be sure to proceed with caution.
 
-## Auto-mount on Boot
+## Auto-mount on boot
 
-If you don't want to manually remount JuiceFS storage on reboot, you can set up automatic mounting of the file system.
-
-First, you need to rename the `juicefs` client to `mount.juicefs` and copy it to the `/sbin/` directory.
-
-```shell
-sudo cp juice/juicefs /sbin/mount.juicefs
-```
-
-Edit the `/etc/fstab` configuration file and add a new record.
-
-```shell
-redis://:<your-redis-password>@192.168.5.5:6379/1    /mnt/jfs       juicefs     _netdev,cache-size=20480     0  0
-```
-
-The mount option `cache-size=20480` means to allocate 20GB local disk space for JuiceFS cache use. Generally speaking, allocating more cache space for JuiceFS will result in better performance.
-
-You can adjust the FUSE mount options in the above configuration as needed, for more information please [check the documentation](../reference/fuse_mount_options.md).
-
-> **Note**: Please replace the Redis address, mount point, and mount options in the above configuration file with your actual information.
+Please refer to ["Mount JuiceFS at Boot Time"](../administration/mount_at_boot.md) for more details.

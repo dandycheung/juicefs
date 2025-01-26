@@ -16,7 +16,10 @@
 
 package meta
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type prefixTxn struct {
 	*kvTxn
@@ -60,8 +63,8 @@ func (tx *prefixTxn) set(key, value []byte) {
 	tx.kvTxn.set(tx.realKey(key), value)
 }
 
-func (tx *prefixTxn) append(key []byte, value []byte) []byte {
-	return tx.kvTxn.append(tx.realKey(key), value)
+func (tx *prefixTxn) append(key []byte, value []byte) {
+	tx.kvTxn.append(tx.realKey(key), value)
 }
 
 func (tx *prefixTxn) incrBy(key []byte, value int64) int64 {
@@ -77,8 +80,8 @@ type prefixClient struct {
 	prefix []byte
 }
 
-func (c *prefixClient) txn(f func(*kvTxn) error, retry int) error {
-	return c.tkvClient.txn(func(tx *kvTxn) error {
+func (c *prefixClient) txn(ctx context.Context, f func(*kvTxn) error, retry int) error {
+	return c.tkvClient.txn(ctx, func(tx *kvTxn) error {
 		return f(&kvTxn{&prefixTxn{tx, c.prefix}, retry})
 	}, retry)
 }

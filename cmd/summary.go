@@ -17,10 +17,10 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"encoding/json"
-	"fmt"
+	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -82,10 +82,6 @@ func cmdSummary() *cli.Command {
 
 func summary(ctx *cli.Context) error {
 	setup(ctx, 1)
-	if runtime.GOOS == "windows" {
-		logger.Infof("Windows is not supported")
-		return nil
-	}
 	var strict uint8
 	if ctx.Bool("strict") {
 		strict = 1
@@ -165,8 +161,15 @@ func summary(ctx *cli.Context) error {
 }
 
 func printCSVResult(results [][]string) {
+	w := csv.NewWriter(os.Stdout)
 	for _, r := range results {
-		fmt.Println(strings.Join(r, ","))
+		if err := w.Write(r); err != nil {
+			logger.Fatalln("error writing record to csv:", err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		logger.Fatal(err)
 	}
 }
 
@@ -181,8 +184,13 @@ func renderTree(results *[][]string, tree *meta.TreeSummary, csv bool) {
 		size = humanize.IBytes(uint64(tree.Size))
 	}
 
+	path := tree.Path
+	if tree.Type == meta.TypeDirectory && !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
 	result := []string{
-		tree.Path,
+		path,
 		size,
 		strconv.FormatUint(tree.Dirs, 10),
 		strconv.FormatUint(tree.Files, 10),

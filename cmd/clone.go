@@ -19,8 +19,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/juicedata/juicefs/pkg/meta"
@@ -57,10 +57,6 @@ $ juicefs clone -p /mnt/jfs/file1 /mnt/jfs/file2`,
 
 func clone(ctx *cli.Context) error {
 	setup(ctx, 2)
-	if runtime.GOOS == "windows" {
-		logger.Infof("Windows is not supported")
-		return nil
-	}
 	srcPath := ctx.Args().Get(0)
 	srcAbsPath, err := filepath.Abs(srcPath)
 	if err != nil {
@@ -70,8 +66,12 @@ func clone(ctx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("lookup inode for %s: %s", srcPath, err)
 	}
+	srcParentIno, err := utils.GetFileInode(filepath.Dir(srcAbsPath))
+	if err != nil {
+		return fmt.Errorf("lookup inode for %s: %s", filepath.Dir(srcAbsPath), err)
+	}
 	dst := ctx.Args().Get(1)
-	if strings.HasSuffix(dst, "/") {
+	if strings.HasSuffix(dst, string(filepath.Separator)) {
 		dst = filepath.Join(dst, filepath.Base(srcPath))
 	}
 	if _, err := os.Stat(dst); err == nil {
@@ -95,7 +95,7 @@ func clone(ctx *cli.Context) error {
 	if srcMp != dstMp {
 		return fmt.Errorf("the clone DST path should be at the same mount point as the SRC path")
 	}
-	if strings.HasPrefix(dstAbsPath, srcAbsPath) {
+	if strings.HasPrefix(dstAbsPath, path.Clean(srcAbsPath)+"/") {
 		return fmt.Errorf("the clone DST path should not be under the SRC path")
 	}
 
@@ -106,24 +106,24 @@ func clone(ctx *cli.Context) error {
 		return fmt.Errorf("lookup inode for %s: %s", dstParent, err)
 	}
 	var cmode uint8
-	var umask int
+	umask := utils.GetUmask()
 	if ctx.Bool("preserve") {
 		cmode |= meta.CLONE_MODE_PRESERVE_ATTR
-		umask = utils.GetUmask()
 	}
 	headerSize := 4 + 4
-	contentSize := 8 + 8 + 1 + uint32(len(dstName)) + 2 + 1
+	contentSize := 8 + 8 + 8 + 1 + uint32(len(dstName)) + 2 + 1
 	wb := utils.NewBuffer(uint32(headerSize) + contentSize)
 	wb.Put32(meta.Clone)
 	wb.Put32(contentSize)
 	wb.Put64(srcIno)
+	wb.Put64(srcParentIno)
 	wb.Put64(dstParentIno)
 	wb.Put8(uint8(len(dstName)))
 	wb.Put([]byte(dstName))
 	wb.Put16(uint16(umask))
 	wb.Put8(cmode)
 	f, err := openController(srcMp)
-	if err == nil {
+	if err != nil {
 		return err
 	}
 	defer f.Close()

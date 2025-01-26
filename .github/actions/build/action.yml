@@ -5,6 +5,9 @@ inputs:
     description: 'build target: juicefs, juicefs.fdb etc'
     required: true
     default: 'juicefs'
+  beta:
+    description: 'beta version for the following test'
+    required: false
 runs:
   using: "composite"
   steps:
@@ -25,17 +28,28 @@ runs:
         go version
         sudo go version
 
-    - name: Build linux target
+    - name: Install tools
       shell: bash
       run: |
-        echo "start to build ${{inputs.target}}"
         if [ "${{inputs.target}}" == "juicefs.fdb" ]; then
           wget -q https://github.com/apple/foundationdb/releases/download/6.3.23/foundationdb-clients_6.3.23-1_amd64.deb
           sudo dpkg -i foundationdb-clients_6.3.23-1_amd64.deb
-          make ${{inputs.target}}
-          mv juicefs.fdb juicefs
-        else
-          make ${{inputs.target}}
+        elif [ "${{inputs.target}}" == "juicefs.gluster" ]; then
+          sudo .github/scripts/apt_install.sh uuid-dev libglusterfs-dev
         fi
-        echo "build ${{inputs.target}} succeed"
 
+    - name: Build linux target
+      shell: bash
+      run: |
+        if [[ -n "${{ inputs.beta }}" ]]; then
+          echo "use beta version of juicefs: ${{inputs.beta}}"
+          wget -q https://juicefs-com-static.oss-cn-shanghai.aliyuncs.com/juicefs_beta/${{inputs.beta}} -O juicefs
+          chmod +x juicefs
+          ./juicefs version
+        else
+          echo "start to build ${{inputs.target}}"
+          make ${{inputs.target}}.cover
+          [ "${{inputs.target}}" != "juicefs" ] &&  mv ${{inputs.target}} juicefs
+          ./juicefs version
+          echo "build ${{inputs.target}} succeed"
+        fi

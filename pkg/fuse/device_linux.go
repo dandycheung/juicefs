@@ -13,13 +13,6 @@
 
 package fuse
 
-// #include <sys/sysmacros.h>
-// #include <sys/types.h>
-// // makedev is a macro, so a wrapper is needed
-// dev_t Makedev(unsigned int maj, unsigned int min) {
-//   return makedev(maj, min);
-// }
-import "C"
 import (
 	"bufio"
 	"fmt"
@@ -29,13 +22,15 @@ import (
 	"syscall"
 
 	"github.com/pkg/errors"
+
+	"golang.org/x/sys/unix"
 )
 
 // ensureFuseDev ensures /dev/fuse exists. If not, it will create one
 func ensureFuseDev() {
 	if _, err := os.Open("/dev/fuse"); os.IsNotExist(err) {
 		// 10, 229 according to https://www.kernel.org/doc/Documentation/admin-guide/devices.txt
-		fuse := C.Makedev(10, 229)
+		fuse := unix.Mkdev(10, 229)
 		if err := syscall.Mknod("/dev/fuse", 0o666|syscall.S_IFCHR, int(fuse)); err != nil {
 			logger.Errorf("mknod /dev/fuse: %v", err)
 		}
@@ -75,8 +70,8 @@ func grantAccess() error {
 		return errors.Errorf("fail to find device cgroup")
 	}
 
-	deviceListPath := path.Join("/sys/fs/cgroup/devices" + deviceCgroup + "/devices.list")
-	deviceAllowPath := "/sys/fs/cgroup/devices" + deviceCgroup + "/devices.allow"
+	deviceListPath := path.Join("/sys/fs/cgroup/devices" + deviceCgroup, "/devices.list")
+	deviceAllowPath := path.Join("/sys/fs/cgroup/devices" + deviceCgroup, "/devices.allow")
 
 	// check if fuse is already allowed
 	deviceListFile, err := os.OpenFile(deviceListPath, os.O_RDONLY, 0)
@@ -108,6 +103,7 @@ func grantAccess() error {
 	if err != nil {
 		return errors.Wrapf(err, "open %s", deviceAllowPath)
 	}
+	defer f.Close()
 	// 10, 229 according to https://www.kernel.org/doc/Documentation/admin-guide/devices.txt
 	content := "c 10:229 rwm"
 	_, err = f.WriteString(content)

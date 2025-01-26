@@ -113,7 +113,8 @@ func (o *ossClient) Head(key string) (Object, error) {
 	}, nil
 }
 
-func (o *ossClient) Get(key string, off, limit int64) (resp io.ReadCloser, err error) {
+func (o *ossClient) Get(key string, off, limit int64, getters ...AttrGetter) (resp io.ReadCloser, err error) {
+	var respHeader http.Header
 	if off > 0 || limit > 0 {
 		var r string
 		if limit > 0 {
@@ -121,19 +122,28 @@ func (o *ossClient) Get(key string, off, limit int64) (resp io.ReadCloser, err e
 		} else {
 			r = fmt.Sprintf("%d-", off)
 		}
-		resp, err = o.bucket.GetObject(key, oss.NormalizedRange(r), oss.RangeBehavior("standard"))
+		resp, err = o.bucket.GetObject(key, oss.NormalizedRange(r), oss.RangeBehavior("standard"), oss.GetResponseHeader(&respHeader))
 	} else {
-		resp, err = o.bucket.GetObject(key)
+		resp, err = o.bucket.GetObject(key, oss.GetResponseHeader(&respHeader))
 		if err == nil {
+			length, err := strconv.ParseInt(resp.(*oss.Response).Headers.Get(oss.HTTPHeaderContentLength), 10, 64)
+			if err != nil {
+				length = -1
+				logger.Warnf("failed to parse content-length %s: %s", resp.(*oss.Response).Headers.Get(oss.HTTPHeaderContentLength), err)
+			}
 			resp = verifyChecksum(resp,
-				resp.(*oss.Response).Headers.Get(oss.HTTPHeaderOssMetaPrefix+checksumAlgr))
+				resp.(*oss.Response).Headers.Get(oss.HTTPHeaderOssMetaPrefix+checksumAlgr),
+				length)
 		}
 	}
+	attrs := applyGetters(getters...)
+	attrs.SetRequestID(respHeader.Get(oss.HTTPHeaderOssRequestID))
+	attrs.SetStorageClass(respHeader.Get(oss.HTTPHeaderOssStorageClass))
 	err = o.checkError(err)
 	return
 }
 
-func (o *ossClient) Put(key string, in io.Reader) error {
+func (o *ossClient) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	var option []oss.Option
 	if ins, ok := in.(io.ReadSeeker); ok {
 		option = append(option, oss.Meta(checksumAlgr, generateChecksum(ins)))
@@ -141,7 +151,12 @@ func (o *ossClient) Put(key string, in io.Reader) error {
 	if o.sc != "" {
 		option = append(option, oss.ObjectStorageClass(oss.StorageClassType(o.sc)))
 	}
-	return o.checkError(o.bucket.PutObject(key, in, option...))
+	var respHeader http.Header
+	option = append(option, oss.GetResponseHeader(&respHeader))
+	err := o.bucket.PutObject(key, in, option...)
+	attrs := applyGetters(getters...)
+	attrs.SetRequestID(respHeader.Get(oss.HTTPHeaderOssRequestID)).SetStorageClass(o.sc)
+	return o.checkError(err)
 }
 
 func (o *ossClient) Copy(dst, src string) error {
@@ -153,18 +168,26 @@ func (o *ossClient) Copy(dst, src string) error {
 	return o.checkError(err)
 }
 
-func (o *ossClient) Delete(key string) error {
-	return o.checkError(o.bucket.DeleteObject(key))
+func (o *ossClient) Delete(key string, getters ...AttrGetter) error {
+	var respHeader http.Header
+	err := o.bucket.DeleteObject(key, oss.GetResponseHeader(&respHeader))
+	attrs := applyGetters(getters...)
+	attrs.SetRequestID(respHeader.Get(oss.HTTPHeaderOssRequestID))
+	return o.checkError(err)
 }
 
-func (o *ossClient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (o *ossClient) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	result, err := o.bucket.ListObjects(oss.Prefix(prefix),
-		oss.Marker(marker), oss.Delimiter(delimiter), oss.MaxKeys(int(limit)))
+	result, err := o.bucket.ListObjectsV2(
+		oss.Prefix(prefix),
+		oss.StartAfter(start),
+		oss.ContinuationToken(token),
+		oss.Delimiter(delimiter),
+		oss.MaxKeys(int(limit)))
 	if o.checkError(err) != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(result.Objects)
 	objs := make([]Object, n)
@@ -178,10 +201,10 @@ func (o *ossClient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	return objs, result.IsTruncated, result.NextContinuationToken, nil
 }
 
-func (o *ossClient) ListAll(prefix, marker string) (<-chan Object, error) {
+func (o *ossClient) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	return nil, notSupported
 }
 
@@ -252,8 +275,9 @@ func (o *ossClient) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, result.NextKeyMarker, nil
 }
 
-func (o *ossClient) SetStorageClass(sc string) {
+func (o *ossClient) SetStorageClass(sc string) error {
 	o.sc = sc
+	return nil
 }
 
 type stsCred struct {
@@ -401,13 +425,23 @@ func newOSS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error)
 		token = os.Getenv("SECURITY_TOKEN")
 
 		if accessKey == "" {
-			if cred, err := fetchStsToken(); err != nil {
-				return nil, fmt.Errorf("No credential provided for OSS")
-			} else {
-				accessKey = cred.AccessKeyId
-				secretKey = cred.AccessKeySecret
-				token = cred.SecurityToken
-				refresh = true
+			var err error
+			var cred *stsCred
+			maxRetry := 4
+			for i := 0; i < maxRetry; i++ {
+				time.Sleep(time.Second * time.Duration(i))
+				if cred, err = fetchStsToken(); err != nil {
+					logger.Warnf("Fetch STS Token try %d: %s", i+1, err)
+				} else {
+					accessKey = cred.AccessKeyId
+					secretKey = cred.AccessKeySecret
+					token = cred.SecurityToken
+					refresh = true
+					break
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("No credential provided for OSS: %s", err)
 			}
 		}
 	}

@@ -46,6 +46,7 @@ type DataWriter interface {
 	GetLength(inode Ino) uint64
 	Truncate(inode Ino, length uint64)
 	UpdateMtime(inode Ino, mtime time.Time)
+	FlushAll() error
 }
 
 type sliceWriter struct {
@@ -107,7 +108,7 @@ func (s *sliceWriter) flushData() {
 	if s.slen == 0 {
 		return
 	}
-	s.prepareID(meta.Background, true)
+	s.prepareID(meta.Background(), true)
 	if s.err != 0 {
 		logger.Infof("flush inode:%d chunk: %s", s.chunk.file.inode, s.err)
 		s.writer.Abort()
@@ -119,7 +120,6 @@ func (s *sliceWriter) flushData() {
 		s.writer.Abort()
 		s.err = syscall.EIO
 	}
-	s.writer = nil
 }
 
 // protected by s.chunk.file
@@ -144,8 +144,6 @@ func (s *sliceWriter) write(ctx meta.Context, off uint32, data []uint8) syscall.
 				logger.Warnf("write: chunk: %d off: %d %s", s.id, off, err)
 				return syscall.EIO
 			}
-		} else if int(off) <= f.w.blockSize {
-			go s.prepareID(ctx, false)
 		}
 	}
 	return 0
@@ -199,13 +197,17 @@ func (c *chunkWriter) commitThread() {
 
 		if err == 0 {
 			var ss = meta.Slice{Id: s.id, Size: s.length, Off: s.soff, Len: s.slen}
-			err = f.w.m.Write(meta.Background, f.inode, c.indx, s.off, ss, s.lastMod)
+			err = f.w.m.Write(meta.Background(), f.inode, c.indx, s.off, ss, s.lastMod)
 			f.w.reader.Invalidate(f.inode, uint64(c.indx)*meta.ChunkSize+uint64(s.off), uint64(ss.Len))
 		}
 
 		f.Lock()
 		if err != 0 {
-			if err != syscall.ENOENT && err != syscall.ENOSPC && err != syscall.EDQUOT {
+			if err == syscall.ENOENT {
+				go func(id uint64, length int) {
+					_ = f.w.store.Remove(id, length)
+				}(s.id, int(s.length))
+			} else if err != syscall.ENOSPC && err != syscall.EDQUOT {
 				logger.Warnf("write inode:%d error: %s", f.inode, err)
 				err = syscall.EIO
 			}
@@ -263,6 +265,7 @@ func (f *fileWriter) writeChunk(ctx meta.Context, indx uint32, off uint32, data 
 			notify:  utils.NewCond(&f.Mutex),
 			started: time.Now(),
 		}
+		go s.prepareID(meta.Background(), false)
 		c.slices = append(c.slices, s)
 		if len(c.slices) == 1 {
 			f.w.Lock()
@@ -538,4 +541,23 @@ func (w *dataWriter) UpdateMtime(inode Ino, mtime time.Time) {
 	if f != nil {
 		f.updateMtime(mtime)
 	}
+}
+
+func (w *dataWriter) FlushAll() error {
+	var err error
+	w.Lock()
+	for inode, ind := range w.files {
+		ind.refs++
+		w.Unlock()
+		eno := ind.Flush(meta.Background())
+		w.free(ind)
+		if eno != 0 {
+			logger.Errorf("flush %s: %s", inode, eno)
+			return eno
+		}
+		logger.Debugf("Flush %d", inode)
+		w.Lock()
+	}
+	w.Unlock()
+	return err
 }

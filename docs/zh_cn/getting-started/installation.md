@@ -1,8 +1,6 @@
 ---
 title: 安装
 sidebar_position: 1
-slug: /installation
-pagination_prev: introduction/comparison/juicefs_vs_s3ql
 description: 本文介绍 JuiceFS 在 Linux、macOS 和 Windows 上的安装方法，包括一键安装、编译安装和容器化安装。
 ---
 
@@ -10,28 +8,34 @@ JuiceFS 有良好的跨平台能力，支持在几乎所有主流架构的各类
 
 JuiceFS 客户端只有一个二进制文件，你可以下载预编译的版本直接解压使用，也可以用源代码手动编译。
 
-## 一键安装
+## 一键安装 {#one-click-installation}
 
 一键安装脚本适用于 Linux 和 macOS 系统，会根据你的硬件架构自动下载安装最新版 JuiceFS 客户端。
 
 ```shell
+# 默认安装到 /usr/local/bin
 curl -sSL https://d.juicefs.com/install | sh -
 ```
 
-## 安装预编译客户端
+```shell
+# 安装到 /tmp 目录下
+curl -sSL https://d.juicefs.com/install | sh -s /tmp
+```
+
+## 安装预编译客户端 {#install-the-pre-compiled-client}
 
 你可以在 [GitHub](https://github.com/juicedata/juicefs/releases) 找到最新版客户端下载地址，每个版本的下载列表中都提供了面向不同 CPU 架构和操作系统的预编译版本，请注意识别选择，例如：
 
-| 文件名                               | 说明                                                                     |
-|--------------------------------------|--------------------------------------------------------------------------|
-| `juicefs-x.x.x-darwin-amd64.tar.gz`  | 面向 Intel 芯片的 macOS 系统                                             |
-| `juicefs-x.x.x-darwin-arm64.tar.gz`  | 面向 M1 系列芯片的 macOS 系统                                            |
-| `juicefs-x.x.x-linux-amd64.tar.gz`   | 面向 x86 架构 Linux 发行版                                               |
-| `juicefs-x.x.x-linux-arm64.tar.gz`   | 面向 ARM 架构的 Linux 发行版                                             |
-| `juicefs-x.x.x-windows-amd64.tar.gz` | 面向 x86 架构的 Windows 系统                                             |
-| `juicefs-hadoop-x.x.x-amd64.jar`     | 面向 x86 架构的 Hadoop Java SDK（同时支持 Linux、macOS 及 Windows 系统） |
+| 文件名                               | 说明                                                                            |
+|--------------------------------------|---------------------------------------------------------------------------------|
+| `juicefs-x.y.z-darwin-amd64.tar.gz`  | 面向 Intel 芯片的 macOS 系统                                                    |
+| `juicefs-x.y.z-darwin-arm64.tar.gz`  | 面向 M1 系列芯片的 macOS 系统                                                   |
+| `juicefs-x.y.z-linux-amd64.tar.gz`   | 面向 x86 架构 Linux 发行版                                                      |
+| `juicefs-x.y.z-linux-arm64.tar.gz`   | 面向 ARM 架构的 Linux 发行版                                                    |
+| `juicefs-x.y.z-windows-amd64.tar.gz` | 面向 x86 架构的 Windows 系统                                                    |
+| `juicefs-hadoop-x.y.z.jar`           | 面向 x86 和 ARM 架构的 Hadoop Java SDK（同时支持 Linux、macOS 及 Windows 系统） |
 
-### Linux 发行版
+### Linux 发行版 {#linux}
 
 以 x86 架构的 Linux 系统为例，下载文件名包含 `linux-amd64` 的压缩包，在终端依次执行以下命令。
 
@@ -80,13 +84,79 @@ sudo apt-get update
 sudo apt-get install juicefs
 ```
 
-### Windows 系统
+#### Fedora Copr
+
+JuiceFS 也提供 [Copr](https://copr.fedorainfracloud.org/coprs/juicedata/juicefs) 仓库，可以方便地在 Red Hat 及其衍生系统上安装最新版的客户端，目前支持的系统有：
+
+- **Amazonlinux 2023**
+- **CentOS 8, 9**
+- **Fedora 37, 38, 39, rawhide**
+- **RHEL 7, 8, 9**
+
+以 Fedora 38 系统为例，执行以下命令安装客户端：
+
+```shell
+# 启用 Copr 仓库
+sudo dnf copr enable -y juicedata/juicefs
+# 安装客户端
+sudo dnf install juicefs
+```
+
+#### Snapcraft
+
+我们也在 [Canonical Snapcraft](https://snapcraft.io) 平台打包并发布了 [Snap 版本的 JuiceFS 客户端](https://github.com/juicedata/juicefs-snapcraft)，对于 Ubuntu 16.04 及以上版本和其他支持 Snap 的操作系统，可以直接使用以下命令安装：
+
+```shell
+sudo snap install juicefs
+# 由于 Snap 是一个封闭的沙箱环境，它会影响客户端的 FUSE 挂载，执行以下命令可以解除限制。
+# 如果只需使用 WebDAV 和 Gateway 则不必执行以下命令。
+sudo ln -s -f /snap/juicefs/current/juicefs /snap/bin/juicefs
+```
+
+当有新版本时，执行以下命令更新客户端：
+
+```shell
+sudo snap refresh juicefs
+```
+
+#### AUR (Arch User Repository) {#aur}
+
+JuiceFS 也提供 [AUR](https://aur.archlinux.org/packages/juicefs) 仓库，可以方便地在 Arch Linux 及其衍生系统上安装最新版的客户端。
+
+对于使用 Yay 包管理器的系统，执行以下命令安装客户端：
+
+```shell
+yay -S juicefs
+```
+
+:::info 说明
+AUR 上存在多个 JuiceFS 客户端的打包，以下是 JuiceFS 官方维护的版本：
+
+- [`aur/juicefs`](https://aur.archlinux.org/packages/juicefs)：是稳定编译版，安装时会拉取最新的稳定版源码并编译安装；
+- [`aur/juicefs-bin`](https://aur.archlinux.org/packages/juicefs-bin)：是稳定预编译版，安装时会直接下载最新的稳定版预编译程序并安装；
+- [`aur/juicefs-git`](https://aur.archlinux.org/packages/juicefs-git)：是开发版，安装时会拉取最新的开发版源码并编译安装；
+:::
+
+另外，你也可以使用 `makepkg` 手动编译安装，以 Arch Linux 系统为例：
+
+```shell
+# 安装依赖
+sudo pacman -S base-devel git go
+# 克隆要打包的 AUR 仓库
+git clone https://aur.archlinux.org/juicefs.git
+# 进入仓库目录
+cd juicefs
+# 编译安装
+makepkg -si
+```
+
+### Windows 系统 {#windows}
 
 在 Windows 系统安装 JuiceFS 有以下几种方法：
 
-1. [使用预编译的 Windows 客户端](#预编译的-windows-客户端)
-2. [使用 Scoop 安装](#scoop)
-3. [在 WSL 中使用 Linux 版客户端](#在-wsl-中使用-linux-版客户端)
+- [使用预编译的 Windows 客户端](#预编译的-windows-客户端)
+- [使用 Scoop 安装](#scoop)
+- [在 WSL 中使用 Linux 版客户端](#在-wsl-中使用-linux-版客户端)
 
 #### 预编译的 Windows 客户端
 
@@ -122,7 +192,7 @@ scoop install juicefs
 
 详情查看「[在 WSL 中使用 JuiceFS](../tutorials/juicefs_on_wsl.md)」
 
-### macOS 系统
+### macOS 系统 {#macos}
 
 由于 macOS 默认不支持 FUSE 接口，需要先安装 [macFUSE](https://osxfuse.github.io) 实现对 FUSE 的支持。
 
@@ -148,7 +218,7 @@ brew install juicefs
 sudo install juicefs /usr/local/bin
 ```
 
-### Docker 容器
+### Docker 容器 {#docker}
 
 对于要在 Docker 容器中使用 JuiceFS 的情况，这里提供一份构建 JuiceFS 客户端镜像的 `Dockerfile`，可以以此为基础单独构建 JuiceFS 客户端镜像或与其他应用打包在一起使用。
 
@@ -176,9 +246,9 @@ RUN set -x && \
 CMD [ "juicefs" ]
 ```
 
-## 手动编译客户端
+## 手动编译客户端 {#manually-compiling}
 
-如果预编译的客户端中没有适用于你的版本，比如 FreeBSD 或 M1 芯片的 macOS，这时可以采用手动编译的方式编译适合你的 JuiceFS 客户端。
+如果预编译的客户端中没有适用于你的版本（比如 FreeBSD），这时可以采用手动编译的方式编译适合你的 JuiceFS 客户端。
 
 另外，手动编译客户端可以让你优先体验到 JuiceFS 开发中的各种新功能，但这需要你具备一定的软件编译相关的基础知识。
 
@@ -190,7 +260,7 @@ CMD [ "juicefs" ]
 
 编译面向 Linux、macOS、BSD 等类 Unix 系统的客户端需要满足以下依赖：
 
-- [Go](https://golang.org) 1.18+
+- [Go](https://golang.org) 1.20+
 - GCC 5.4+
 
 1. 克隆源码
@@ -230,7 +300,7 @@ CMD [ "juicefs" ]
 在 Windows 系统编译 JuiceFS 客户端需要安装以下依赖：
 
 - [WinFsp](https://github.com/winfsp/winfsp)
-- [Go](https://golang.org) 1.18+
+- [Go](https://golang.org) 1.20+
 - GCC 5.4+
 
 其中，WinFsp 和 Go 直接下载安装即可。GCC 需要使用第三方提供的版本，可以使用 [MinGW-w64](https://www.mingw-w64.org) 或 [Cygwin](https://www.cygwin.com)，这里以 MinGW-w64 为例介绍。
@@ -275,9 +345,7 @@ CMD [ "juicefs" ]
 
 ### 在 Linux 中交叉编译 Windows 客户端
 
-为 Windows 编译特定版本客户端的过程与[类 Unix 客户端](#类-unix-客户端)基本一致，可以直接在 Linux 系统中进行编译，但除了 `go` 和 `gcc` 必须安装以外，还需要安装：
-
-- [MinGW-w64](https://www.mingw-w64.org/downloads)
+为 Windows 编译特定版本客户端的过程与[类 Unix 客户端](#类-unix-客户端)基本一致，可以直接在 Linux 系统中进行编译，但除了 `go` 和 `gcc` 必须安装以外，还需要安装 [MinGW-w64](https://www.mingw-w64.org/downloads)
 
 安装 Linux 发行版包管理器提供的最新版本即可，例如 Ubuntu 20.04+ 可以直接安装：
 
@@ -313,7 +381,7 @@ make juicefs.exe
    make juicefs.linux
    ```
 
-## 卸载客户端
+## 卸载客户端 {#uninstall}
 
 JuiceFS 客户端只有一个二进制文件，只需找到程序所在位置删除即可。例如，参照本文档 Linux 系统安装的客户端，执行以下命令卸载客户端：
 

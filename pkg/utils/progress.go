@@ -19,6 +19,7 @@ package utils
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -33,18 +34,22 @@ type Progress struct {
 }
 
 type Bar struct {
-	*mpb.Bar
 	total int64
+	*mpb.Bar
 }
 
-func (b *Bar) IncrTotal(n int64) { // not thread safe
-	b.total += n
-	b.Bar.SetTotal(b.total, false)
-}
-
-func (b *Bar) SetTotal(total int64) { // not thread safe
-	b.total = total
+func (b *Bar) IncrTotal(n int64) {
+	total := atomic.AddInt64(&b.total, n)
 	b.Bar.SetTotal(total, false)
+}
+
+func (b *Bar) SetTotal(total int64) {
+	atomic.StoreInt64(&b.total, total)
+	b.Bar.SetTotal(total, false)
+}
+
+func (b *Bar) GetTotal() int64 {
+	return atomic.LoadInt64(&b.total)
 }
 
 func (b *Bar) Done() {
@@ -181,6 +186,13 @@ func (p *Progress) AddDoubleSpinner(name string) *DoubleSpinner {
 	return &DoubleSpinner{
 		p.AddCountSpinner(name).Bar,
 		p.AddByteSpinner(name).Bar,
+	}
+}
+
+func (p *Progress) AddDoubleSpinnerTwo(countName, sizeName string) *DoubleSpinner {
+	return &DoubleSpinner{
+		p.AddCountSpinner(countName).Bar,
+		p.AddByteSpinner(sizeName).Bar,
 	}
 }
 

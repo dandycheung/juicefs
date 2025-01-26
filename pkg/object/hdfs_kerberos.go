@@ -7,6 +7,7 @@
 package object
 
 import (
+	"encoding/base64"
 	"fmt"
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"os"
@@ -31,12 +32,27 @@ func getKerberosClient() (*krb.Client, error) {
 
 	// Try to authenticate with keytab file first.
 	keytabPath := os.Getenv("KRB5KEYTAB")
+	keytabBase64 := os.Getenv("KRB5KEYTAB_BASE64")
 	principal := os.Getenv("KRB5PRINCIPAL")
-	if keytabPath != "" && principal != "" {
-		kt, err := keytab.Load(keytabPath)
+
+	var kt *keytab.Keytab
+	if keytabBase64 != "" {
+		decodedKeytab, err := base64.StdEncoding.DecodeString(keytabBase64)
+		if err != nil {
+			return nil, fmt.Errorf("error decoding Base64 encoded data %s", err)
+		}
+		kt = new(keytab.Keytab)
+		err = kt.Unmarshal(decodedKeytab)
 		if err != nil {
 			return nil, err
 		}
+	} else if keytabPath != "" {
+		kt, err = keytab.Load(keytabPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if kt != nil {
 		// e.g. KRB5PRINCIPAL="primary/instance@realm"
 		sp := strings.Split(principal, "@")
 		if len(sp) != 2 {

@@ -36,7 +36,11 @@ import (
 	"github.com/tencentyun/cos-go-sdk-v5"
 )
 
-const cosChecksumKey = "x-cos-meta-" + checksumAlgr
+const (
+	cosChecksumKey        = "x-cos-meta-" + checksumAlgr
+	cosRequestIDKey       = "X-Cos-Request-Id"
+	cosStorageClassHeader = "X-Cos-Storage-Class"
+)
 
 type COS struct {
 	c        *cos.Client
@@ -86,8 +90,8 @@ func (c *COS) Head(key string) (Object, error) {
 		mtime, _ = time.Parse(time.RFC1123, val[0])
 	}
 	var sc string
-	if val, ok := header["X-Cos-Storage-Class"]; ok {
-		sc = val[0]
+	if val := header.Get(cosStorageClassHeader); val != "" {
+		sc = val
 	} else {
 		// https://cloud.tencent.com/document/product/436/7745
 		// This header is returned only if the object is not STANDARD storage class.
@@ -96,7 +100,7 @@ func (c *COS) Head(key string) (Object, error) {
 	return &obj{key, size, mtime, strings.HasSuffix(key, "/"), sc}, nil
 }
 
-func (c *COS) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (c *COS) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	params := &cos.ObjectGetOptions{Range: getRange(off, limit)}
 	resp, err := c.c.Object.Get(ctx, key, params)
 	if err != nil {
@@ -107,12 +111,21 @@ func (c *COS) Get(key string, off, limit int64) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if off == 0 && limit == -1 {
-		resp.Body = verifyChecksum(resp.Body, resp.Header.Get(cosChecksumKey))
+		length, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+		if err != nil {
+			length = -1
+			logger.Warnf("failed to parse content-length %s: %s", resp.Header.Get("Content-Length"), err)
+		}
+		resp.Body = verifyChecksum(resp.Body, resp.Header.Get(cosChecksumKey), length)
+	}
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.Header.Get(cosRequestIDKey)).SetStorageClass(resp.Header.Get(cosStorageClassHeader))
 	}
 	return resp.Body, nil
 }
 
-func (c *COS) Put(key string, in io.Reader) error {
+func (c *COS) Put(key string, in io.Reader, getters ...AttrGetter) error {
 	var options cos.ObjectPutOptions
 	if ins, ok := in.(io.ReadSeeker); ok {
 		header := http.Header(map[string][]string{
@@ -126,7 +139,11 @@ func (c *COS) Put(key string, in io.Reader) error {
 		}
 		options.ObjectPutHeaderOptions.XCosStorageClass = c.sc
 	}
-	_, err := c.c.Object.Put(ctx, key, in, &options)
+	resp, err := c.c.Object.Put(ctx, key, in, &options)
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.Header.Get(cosRequestIDKey)).SetStorageClass(c.sc)
+	}
 	return err
 }
 
@@ -140,28 +157,26 @@ func (c *COS) Copy(dst, src string) error {
 	return err
 }
 
-func (c *COS) Delete(key string) error {
-	_, err := c.c.Object.Delete(ctx, key)
+func (c *COS) Delete(key string, getters ...AttrGetter) error {
+	resp, err := c.c.Object.Delete(ctx, key)
+	if resp != nil {
+		attrs := applyGetters(getters...)
+		attrs.SetRequestID(resp.Header.Get(cosRequestIDKey))
+	}
 	return err
 }
 
-func (c *COS) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+func (c *COS) List(prefix, start, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	param := cos.BucketGetOptions{
 		Prefix:       prefix,
-		Marker:       marker,
+		Marker:       start,
 		MaxKeys:      int(limit),
 		Delimiter:    delimiter,
 		EncodingType: "url",
 	}
 	resp, _, err := c.c.Bucket.Get(ctx, &param)
-	for err == nil && len(resp.Contents) == 0 && resp.IsTruncated {
-		if param.Marker, err = cos.DecodeURIComponent(resp.NextMarker); err != nil {
-			return nil, errors.WithMessagef(err, "failed to decode nextMarker %s", resp.NextMarker)
-		}
-		resp, _, err = c.c.Bucket.Get(ctx, &param)
-	}
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	n := len(resp.Contents)
 	objs := make([]Object, n)
@@ -170,7 +185,7 @@ func (c *COS) List(prefix, marker, delimiter string, limit int64) ([]Object, err
 		t, _ := time.Parse(time.RFC3339, o.LastModified)
 		key, err := cos.DecodeURIComponent(o.Key)
 		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to decode key %s", o.Key)
+			return nil, false, "", errors.WithMessagef(err, "failed to decode key %s", o.Key)
 		}
 		objs[i] = &obj{key, int64(o.Size), t, strings.HasSuffix(key, "/"), o.StorageClass}
 	}
@@ -178,16 +193,16 @@ func (c *COS) List(prefix, marker, delimiter string, limit int64) ([]Object, err
 		for _, p := range resp.CommonPrefixes {
 			key, err := cos.DecodeURIComponent(p)
 			if err != nil {
-				return nil, errors.WithMessagef(err, "failed to decode commonPrefixes %s", p)
+				return nil, false, "", errors.WithMessagef(err, "failed to decode commonPrefixes %s", p)
 			}
 			objs = append(objs, &obj{key, 0, time.Unix(0, 0), true, ""})
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
-	return objs, nil
+	return objs, resp.IsTruncated, resp.NextMarker, nil
 }
 
-func (c *COS) ListAll(prefix, marker string) (<-chan Object, error) {
+func (c *COS) ListAll(prefix, marker string, followLink bool) (<-chan Object, error) {
 	return nil, notSupported
 }
 
@@ -228,7 +243,7 @@ func (c *COS) AbortUpload(key string, uploadID string) {
 func (c *COS) CompleteUpload(key string, uploadID string, parts []*Part) error {
 	var cosParts []cos.Object
 	for i := range parts {
-		cosParts = append(cosParts, cos.Object{Key: key, ETag: parts[i].ETag, PartNumber: parts[i].Num})
+		cosParts = append(cosParts, cos.Object{ETag: parts[i].ETag, PartNumber: parts[i].Num})
 	}
 	_, _, err := c.c.Object.CompleteMultipartUpload(ctx, key, uploadID, &cos.CompleteMultipartUploadOptions{Parts: cosParts})
 	return err
@@ -250,8 +265,9 @@ func (c *COS) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, result.NextKeyMarker, nil
 }
 
-func (c *COS) SetStorageClass(sc string) {
+func (c *COS) SetStorageClass(sc string) error {
 	c.sc = sc
+	return nil
 }
 
 func autoCOSEndpoint(bucketName, accessKey, secretKey, token string) (string, error) {
@@ -275,7 +291,7 @@ func autoCOSEndpoint(bucketName, accessKey, secretKey, token string) (string, er
 		}
 	}
 
-	return "", fmt.Errorf("bucket %q doesnot exist", bucketName)
+	return "", fmt.Errorf("bucket %q doesn't exist", bucketName)
 }
 
 func newCOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {

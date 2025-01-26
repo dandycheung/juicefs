@@ -81,6 +81,7 @@ type Format struct {
     MetaVersion      int    `json:",omitempty"`
     MinClientVersion string `json:",omitempty"`
     MaxClientVersion string `json:",omitempty"`
+    EnableACL        bool
 }
 ```
 
@@ -103,6 +104,7 @@ type Format struct {
 - MetaVersion: the version of the metadata structure, currently V1 (V0 and V1 are the same)
 - MinClientVersion: the minimum client version allowed to connect, clients earlier than this version will be denied
 - MaxClientVersion: the maximum client version allowed to connect
+- EnableACL: enable ACL or not
 
 This structure is serialized into JSON format and stored in the metadata engine.
 
@@ -168,15 +170,15 @@ type Attr struct {
     Parent    Ino  // inode of parent; 0 means tracked by parentKey (for hardlinks)
     Full      bool // the attributes are completed or not
     KeepCache bool // whether to keep the cached page or not
+
+    AccessACL  uint32 // access ACL id (identical ACL rules share the same access ACL ID.)
+    DefaultACL uint32 // default ACL id (default ACL and the access ACL share the same cache and store)
 }
 ```
 
 There are a few fields that need clarification.
 
-- Atime/Atimensec: currently support three modes
-  - noatime: set only when the file is created and when `SetAttr` is actively called, while accessing and modifying the file usually does not affect the Atime value, this is the default behavior
-  - relatime: update  inode access times relative to modify or change time.  Access time is only updated if the previous access time was earlier than the current modify or change time, or the file's last access time is always updated if it  is more than 1 day old
-  - strictatime: always update atime on access
+- Atime/Atimensec: See [`--atime-mode`](../reference/command_reference.mdx#mount-metadata-options)
 - Nlink
   - Directory file: initial value is 2 ('.' and '..'), add 1 for each subdirectory
   - Other files: initial value is 1, add 1 for each hard link created
@@ -229,7 +231,7 @@ type Slice struct {
 
 This structure is encoded and saved in binary format, taking up 24 bytes.
 
-#### SliceRef
+#### SliceRef {#sliceref}
 
 Records the reference count of a Slice, as follows
 
@@ -506,6 +508,8 @@ type node struct {
     Length uint64 `xorm:"notnull"`
     Rdev   uint32
     Parent Ino
+    AccessACLId  uint32 `xorm:"'access_acl_id'"`
+    DefaultACLId uint32 `xorm:"'default_acl_id'"`
 }
 ```
 
@@ -726,7 +730,7 @@ type flock struct {
 }
 ```
 
-#### Plock {tkv-plock}
+#### Plock {#tkv-plock}
 
 ```
 P${inode} -> plocks
@@ -830,7 +834,7 @@ Slice{pos: 40M, id:  0, size: 24M, off:   0, len: 24M} // can be omitted
 
 ### Data objects
 
-#### Object naming
+#### Object naming {#object-storage-naming-format}
 
 Block is the basic unit for JuiceFS to manage data. Its size is 4 MiB by default, and can be changed only when formatting a file system, within the interval [64 KiB, 16 MiB]. Each Block is an object in the object storage after upload, and is named in the format `${fsname}/chunks/${hash}/${basename}`, where
 
@@ -910,7 +914,7 @@ You can configure the compression algorithm (supporting `lz4` and `zstd`) with t
 
 #### Data encryption
 
-The RSA private key can be configured to enable [static data encryption](../security/encrypt.md) when formatting a file system with the `--encrypt-rsa-key <value>` parameter, which allows all data blocks of this file system to be encrypted before uploading to the object storage. The object name is still the same as default, while its content becomes a header plus the result of the data encryption algorithm. The header contains a random seed and the symmetric key used for decryption, and the symmetric key itself is encrypted with the RSA private key. Therefore, it is not allowed to modify the RSA private key in the [file system formatting Information](#setting), otherwise reading existing data will fail.
+The RSA private key can be configured to enable [static data encryption](../security/encryption.md) when formatting a file system with the `--encrypt-rsa-key <value>` parameter, which allows all data blocks of this file system to be encrypted before uploading to the object storage. The object name is still the same as default, while its content becomes a header plus the result of the data encryption algorithm. The header contains a random seed and the symmetric key used for decryption, and the symmetric key itself is encrypted with the RSA private key. Therefore, it is not allowed to modify the RSA private key in the [file system formatting Information](#setting), otherwise reading existing data will fail.
 
 :::note
 If both compression and encryption are enabled, the original data will be compressed and then encrypted before uploading to the object storage.

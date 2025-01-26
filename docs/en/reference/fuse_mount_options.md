@@ -1,6 +1,6 @@
 ---
 title: FUSE Mount Options
-sidebar_position: 6
+sidebar_position: 5
 slug: /fuse_mount_options
 ---
 
@@ -8,7 +8,7 @@ JuiceFS provides several access methods, FUSE is the common one, which is the wa
 
 This guide describes the common FUSE mount options for JuiceFS, with two ways to add mount options:
 
-1. Run [`juicefs mount`](../reference/command_reference.md#mount), and use `-o` to specify multiple options separated by commas.
+1. Run [`juicefs mount`](../reference/command_reference.mdx#mount), and use `-o` to specify multiple options separated by commas.
 
    ```bash
    juicefs mount -d -o allow_other,writeback_cache sqlite3://myjfs.db ~/jfs

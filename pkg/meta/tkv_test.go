@@ -28,7 +28,7 @@ import (
 
 func TestMemKVClient(t *testing.T) {
 	_ = os.Remove(settingPath)
-	m, err := newKVMeta("memkv", "jfs-unit-test", DefaultConf())
+	m, err := newKVMeta("memkv", "jfs-unit-test", testConfig())
 	if err != nil || m.Name() != "memkv" {
 		t.Fatalf("create meta: %s", err)
 	}
@@ -36,7 +36,7 @@ func TestMemKVClient(t *testing.T) {
 }
 
 func TestTiKVClient(t *testing.T) { //skip mutate
-	m, err := newKVMeta("tikv", "127.0.0.1:2379/jfs-unit-test", DefaultConf())
+	m, err := newKVMeta("tikv", "127.0.0.1:2379/jfs-unit-test", testConfig())
 	if err != nil || m.Name() != "tikv" {
 		t.Fatalf("create meta: %s", err)
 	}
@@ -44,7 +44,7 @@ func TestTiKVClient(t *testing.T) { //skip mutate
 }
 
 func TestBadgerClient(t *testing.T) {
-	m, err := newKVMeta("badger", "badger", DefaultConf())
+	m, err := newKVMeta("badger", "badger", testConfig())
 	if err != nil || m.Name() != "badger" {
 		t.Fatalf("create meta: %s", err)
 	}
@@ -55,7 +55,7 @@ func TestEtcdClient(t *testing.T) { //skip mutate
 	if os.Getenv("SKIP_NON_CORE") == "true" {
 		t.Skipf("skip non-core test")
 	}
-	m, err := newKVMeta("etcd", os.Getenv("ETCD_ADDR"), DefaultConf())
+	m, err := newKVMeta("etcd", os.Getenv("ETCD_ADDR"), testConfig())
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
@@ -64,7 +64,7 @@ func TestEtcdClient(t *testing.T) { //skip mutate
 
 func testTKV(t *testing.T, c tkvClient) {
 	txn := func(f func(kt *kvTxn)) {
-		if err := c.txn(func(kt *kvTxn) error {
+		if err := c.txn(Background(), func(kt *kvTxn) error {
 			f(kt)
 			return nil
 		}, 0); err != nil {
@@ -197,21 +197,21 @@ func testTKV(t *testing.T, c tkvClient) {
 
 	// counters
 	var count int64
-	c.txn(func(tx *kvTxn) error {
+	c.txn(Background(), func(tx *kvTxn) error {
 		count = tx.incrBy([]byte("counter"), -1)
 		return nil
 	}, 0)
 	if count != -1 {
 		t.Fatalf("counter should be -1, but got %d", count)
 	}
-	c.txn(func(tx *kvTxn) error {
+	c.txn(Background(), func(tx *kvTxn) error {
 		count = tx.incrBy([]byte("counter"), 0)
 		return nil
 	}, 0)
 	if count != -1 {
 		t.Fatalf("counter should be -1, but got %d", count)
 	}
-	c.txn(func(tx *kvTxn) error {
+	c.txn(Background(), func(tx *kvTxn) error {
 		count = tx.incrBy([]byte("counter"), 2)
 		return nil
 	}, 0)

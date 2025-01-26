@@ -105,6 +105,7 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
 
   mutate-test:
+    timeout-minutes: 120
     if: "!github.event.pull_request.draft"
     name: ${{matrix.test_file}}
     needs: build-matrix
@@ -126,6 +127,7 @@ jobs:
           job_name: ${{matrix.test_file}}
 
       - name: Build
+        timeout-minutes: 10
         uses: ./.github/actions/build
 
       - name: Remove problem matcher for go
@@ -138,6 +140,7 @@ jobs:
           go install github.com/zimmski/go-mutesting/cmd/go-mutesting@latest
           sudo .github/scripts/apt_install.sh g++-multilib redis-server libacl1-dev attr python3-tk
           sudo pip install mysqlclient
+          apt -y install glusterfs-server
 
       - name: Prepare Database
         timeout-minutes: 10
@@ -145,7 +148,7 @@ jobs:
           docker run -d -p 9000:9000 -p 9001:9001 -e "MINIO_ROOT_USER=testUser" -e "MINIO_ROOT_PASSWORD=testUserPassword" quay.io/minio/minio:RELEASE.2022-01-25T19-56-04Z server /data --console-address ":9001"
           go install github.com/minio/mc@RELEASE.2022-01-07T06-01-38Z && mc config host add local http://127.0.0.1:9000 testUser testUserPassword && mc mb local/testbucket
           make
-          sudo make -C fstests setup
+          # sudo make -C fstests setup
 
       - name: run mutate test
         # timeout-minutes: 120
@@ -197,7 +200,7 @@ jobs:
           JOB_NAME=${{matrix.test_file}} JOB_URL=${{steps.jobs.outputs.html_url}}  STAT_RESULT_FILE=stat_result.log python3 .github/scripts/mutate/save_report.py
 
       - name: Setup upterm session
-        if: ${{ failure() && github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true' }}
+        if: failure() && (github.event.inputs.debug == 'true' || github.run_attempt != 1)
         timeout-minutes: 60
         uses: lhotari/action-upterm@v1
 
@@ -242,13 +245,13 @@ jobs:
             Usage: https://github.com/juicedata/juicefs/blob/main/.github/scripts/mutate/how_to_use_mutate_test.md  
 
       - name: Send Slack Notification
-        if: ${{ failure() && github.event_name != 'workflow_dispatch' }}
+        if: failure() && github.event_name != 'workflow_dispatch'
         uses: juicedata/slack-notify-action@main
         with:
           channel-id: "${{ secrets.SLACK_CHANNEL_ID_FOR_PR_CHECK_NOTIFY }}"
           slack_bot_token: "${{ secrets.SLACK_BOT_TOKEN }}"
 
       - name: Success
-        if: ${{ success() }}
+        if: success()
         run: echo "All Done"
 

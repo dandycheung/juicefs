@@ -18,10 +18,7 @@ package object
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha1"
 	"crypto/tls"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"math/rand"
@@ -38,7 +35,6 @@ var resolver = dnscache.New(time.Minute)
 var httpClient *http.Client
 
 func init() {
-	rand.Seed(time.Now().Unix())
 	httpClient = &http.Client{
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
@@ -89,7 +85,7 @@ func GetHttpClient() *http.Client {
 
 func cleanup(response *http.Response) {
 	if response != nil && response.Body != nil {
-		_, _ = io.ReadAll(response.Body)
+		_, _ = io.Copy(io.Discard, response.Body)
 		_ = response.Body.Close()
 	}
 }
@@ -108,24 +104,6 @@ func (s *RestfulStorage) String() string {
 }
 
 var HEADER_NAMES = []string{"Content-MD5", "Content-Type", "Date"}
-
-// RequestURL is fully url of api request
-func sign(req *http.Request, accessKey, secretKey, signName string) {
-	if accessKey == "" {
-		return
-	}
-	toSign := req.Method + "\n"
-	for _, n := range HEADER_NAMES {
-		toSign += req.Header.Get(n) + "\n"
-	}
-	bucket := strings.Split(req.URL.Host, ".")[0]
-	toSign += "/" + bucket + req.URL.Path
-	h := hmac.New(sha1.New, []byte(secretKey))
-	_, _ = h.Write([]byte(toSign))
-	sig := base64.StdEncoding.EncodeToString(h.Sum(nil))
-	token := signName + " " + accessKey + ":" + sig
-	req.Header.Add("Authorization", token)
-}
 
 func (s *RestfulStorage) request(method, key string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	uri := s.endpoint + "/" + key
@@ -205,7 +183,7 @@ func checkGetStatus(statusCode int, partial bool) error {
 	return nil
 }
 
-func (s *RestfulStorage) Get(key string, off, limit int64) (io.ReadCloser, error) {
+func (s *RestfulStorage) Get(key string, off, limit int64, getters ...AttrGetter) (io.ReadCloser, error) {
 	headers := make(map[string]string)
 	if off > 0 || limit > 0 {
 		headers["Range"] = getRange(off, limit)
@@ -224,7 +202,7 @@ func (s *RestfulStorage) Get(key string, off, limit int64) (io.ReadCloser, error
 	return resp.Body, nil
 }
 
-func (u *RestfulStorage) Put(key string, body io.Reader) error {
+func (u *RestfulStorage) Put(key string, body io.Reader, getters ...AttrGetter) error {
 	resp, err := u.request("PUT", key, body, nil)
 	if err != nil {
 		return err
@@ -249,7 +227,7 @@ func (s *RestfulStorage) Copy(dst, src string) error {
 	return s.Put(dst, bytes.NewReader(d))
 }
 
-func (s *RestfulStorage) Delete(key string) error {
+func (s *RestfulStorage) Delete(key string, getters ...AttrGetter) error {
 	resp, err := s.request("DELETE", key, nil, nil)
 	if err != nil {
 		return err
@@ -261,8 +239,8 @@ func (s *RestfulStorage) Delete(key string) error {
 	return nil
 }
 
-func (s *RestfulStorage) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
-	return nil, notSupported
+func (s *RestfulStorage) List(prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
+	return nil, false, "", notSupported
 }
 
 var _ ObjectStorage = &RestfulStorage{}
